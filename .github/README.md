@@ -2,14 +2,14 @@
 
 waypoint-storage-service owns file storage for attachments. NestJS, its own PostgreSQL database (one database and one user in the shared PostgreSQL of the VPS), events over NATS JetStream through `@waypoint/nest-messaging`, internal REST for the API gateway. Local port 3015.
 
-| | |
-| --- | --- |
-| Data | File metadata (name, type, size, author, linked task or comment); the files themselves live in object storage. |
-| API | Signed upload and download URLs, the 25 MB per-file limit, an organization's largest files. |
-| Emits | `file.uploaded`, `file.deleted` |
-| Listens to | `task.purged (deletes its attachments)` |
-| External | OVH Object Storage in production, MinIO locally. |
-| Phase | Extracted later, when needed |
+|            |                                                                                                                |
+| ---------- | -------------------------------------------------------------------------------------------------------------- |
+| Data       | File metadata (name, type, size, author, linked task or comment); the files themselves live in object storage. |
+| API        | Signed upload and download URLs, the 25 MB per-file limit, an organization's largest files.                    |
+| Emits      | `file.uploaded`, `file.deleted`                                                                                |
+| Listens to | `task.purged (deletes its attachments)`                                                                        |
+| External   | OVH Object Storage in production, MinIO locally.                                                               |
+| Phase      | Extracted later, when needed                                                                                   |
 
 Starts as a module of waypoint-task-service.
 
