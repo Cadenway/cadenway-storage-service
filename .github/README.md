@@ -1,6 +1,6 @@
-# waypoint-storage-service
+# cadenway-storage-service
 
-waypoint-storage-service owns file storage for attachments. NestJS, its own PostgreSQL database (one database and one user in the shared PostgreSQL of the VPS), events over NATS JetStream through `@waypoint/nest-messaging`, internal REST for the API gateway. Local port 3015.
+cadenway-storage-service owns file storage for attachments. NestJS, its own PostgreSQL database (one database and one user in the shared PostgreSQL of the VPS), events over NATS JetStream through `@cadenway/nest-messaging`, internal REST for the API gateway. Local port 3015.
 
 |            |                                                                                                                |
 | ---------- | -------------------------------------------------------------------------------------------------------------- |
@@ -11,18 +11,18 @@ waypoint-storage-service owns file storage for attachments. NestJS, its own Post
 | External   | OVH Object Storage in production, MinIO locally.                                                               |
 | Phase      | Extracted later, when needed                                                                                   |
 
-Starts as a module of waypoint-task-service.
+Starts as a module of cadenway-task-service.
 
 ## Getting started
 
 Requirements: Node.js LTS and pnpm (versions in `package.json`), and Docker.
 
-1. Clone this repository next to the other Waypoint repositories, flat, in one folder.
-2. To run it with the rest of Waypoint, start the stack from `waypoint-ops`; it builds the sibling
+1. Clone this repository next to the other Cadenway repositories, flat, in one folder.
+2. To run it with the rest of Cadenway, start the stack from `cadenway-ops`; it builds the sibling
    folders, this one included (`core` profile; `full` adds every other service):
 
    ```bash
-   cd ../waypoint-ops/compose
+   cd ../cadenway-ops/compose
    docker compose -f compose.yaml -f compose.local.yaml --profile core up -d
    ```
 

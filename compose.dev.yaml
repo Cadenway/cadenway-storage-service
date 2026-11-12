@@ -1,8 +1,8 @@
-# Dependencies of waypoint-storage-service for working on it alone: its own PostgreSQL database and
+# Dependencies of cadenway-storage-service for working on it alone: its own PostgreSQL database and
 # NATS JetStream. The service itself runs on the host with `pnpm start:dev`.
 #
 # The credentials below are local development values, matching .env.example.
-name: waypoint-storage-service-dev
+name: cadenway-storage-service-dev
 
 services:
   postgres:

@@ -1,6 +1,6 @@
-# waypoint-storage-service documentation
+# cadenway-storage-service documentation
 
-Planned role: waypoint-storage-service owns file storage for attachments. NestJS, its own PostgreSQL database (one database and one user in the shared PostgreSQL of the VPS), events over NATS JetStream through `@waypoint/nest-messaging`, internal REST for the API gateway. Local port 3015.
+Planned role: cadenway-storage-service owns file storage for attachments. NestJS, its own PostgreSQL database (one database and one user in the shared PostgreSQL of the VPS), events over NATS JetStream through `@cadenway/nest-messaging`, internal REST for the API gateway. Local port 3015.
 
 ## Current status
 

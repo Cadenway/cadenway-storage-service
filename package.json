@@ -1,7 +1,7 @@
 {
-  "name": "waypoint-storage-service",
+  "name": "cadenway-storage-service",
   "version": "0.0.0",
-  "description": "Waypoint storage service: attachments in object storage.",
+  "description": "Cadenway storage service: attachments in object storage.",
   "private": true,
   "license": "UNLICENSED",
   "type": "module",

@@ -3,7 +3,7 @@
   "packages": {
     ".": {
       "release-type": "node",
-      "package-name": "waypoint-storage-service",
+      "package-name": "cadenway-storage-service",
       "changelog-path": "CHANGELOG.md",
       "include-component-in-tag": false
     }
