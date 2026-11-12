@@ -1,6 +1,6 @@
 {
   "name": "cadenway-storage-service",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Cadenway storage service: attachments in object storage.",
   "private": true,
   "license": "UNLICENSED",
