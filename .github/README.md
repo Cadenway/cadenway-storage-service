@@ -8,7 +8,7 @@ cadenway-storage-service owns file storage for attachments. NestJS, its own Post
 | API        | Signed upload and download URLs, the 25 MB per-file limit, an organization's largest files.                    |
 | Emits      | `file.uploaded`, `file.deleted`                                                                                |
 | Listens to | `task.purged (deletes its attachments)`                                                                        |
-| External   | OVH Object Storage in production, MinIO locally.                                                               |
+| External   | OVH Object Storage in production, Garage locally.                                                              |
 | Phase      | Extracted later, when needed                                                                                   |
 
 Starts as a module of cadenway-task-service.

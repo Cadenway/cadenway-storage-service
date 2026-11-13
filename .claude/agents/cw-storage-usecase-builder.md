@@ -47,6 +47,7 @@ Load them with the `Skill` tool when their subject comes up (if the tool is unav
 | --- | --- |
 | `cw-outbox-and-events` | when the use case emits an event |
 | `cw-hexagonal-module-layout` | always |
+| `cw-logging-and-tracing` | when adding a log line, a span or a metric |
 
 ## Procedure
 

@@ -18,7 +18,7 @@ File storage for attachments.
 
 **Events consumed**: `task.purged` (deletes its attachments).
 
-**External systems**: OVH Object Storage in production, MinIO locally.
+**External systems**: OVH Object Storage in production, Garage locally.
 
 **Mockup screens**: Attachments and their full-screen preview; Organisation › Quotas (largest files).
 
@@ -27,12 +27,32 @@ File storage for attachments.
 - 25 MB per file; the type is derived from the extension.
 - The service never streams file bytes through itself: clients use signed URLs.
 
+## Upload policy
+
+- Upload is a presigned POST valid 5 minutes, with imposed conditions: a size from 1 byte to 25 MB,
+  the key `org/<organizationId>/<uuid>` and the content type.
+- Finalizing an upload reads the first 4 KiB of the object and checks its real type with
+  `file-type`.
+- Download is a presigned URL served as an attachment; SVG and HTML are never displayed inline.
+- File metadata has a `scan_status` column from the first migration.
+- S3 client (`@aws-sdk/client-s3`): `requestChecksumCalculation: 'WHEN_REQUIRED'`; URLs are signed
+  for the host the browser sees.
+
 ## Notes
 
 Starts as a module of cadenway-task-service.
 
 Everything above comes from the [repositories document](https://claude.ai/artifact/BPinmYxoF3mbK8w9BMB43N) and the
 [integration guide](https://claude.ai/artifact/CpJHVCiFfF9j3KbHQ2S1Et). If the mockup disagrees with this guide, update the guide and its source skill for both assistants.
+
+## Engineering standards
+
+These skills fix the engineering standards this service follows. They are target conventions, not proof of an implementation in this snapshot.
+
+| Skill                                                                                                                                                | What it fixes                                                                                                                                                                                                                           |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cw-database-conventions` ([Claude](../.claude/skills/cw-database-conventions/SKILL.md), [Codex](../.codex/skills/cw-database-conventions/SKILL.md)) | Plural snake_case tables, `id` from `uuidv7()`, `organization_id` first in tenant indexes, `version`, `timestamptz` dates, `text` with `CHECK` for enumerations, forced row-level security, a pool of 5 connections, timeouts per role. |
+| `cw-logging-and-tracing` ([Claude](../.claude/skills/cw-logging-and-tracing/SKILL.md), [Codex](../.codex/skills/cw-logging-and-tracing/SKILL.md))    | JSON logs with fixed fields and masking, W3C `traceparent` over HTTP and NATS, the ESM start-up flags, metrics per route and lag alerts, health and shutdown semantics.                                                                 |
 
 ## Contract and delivery sequence
 
