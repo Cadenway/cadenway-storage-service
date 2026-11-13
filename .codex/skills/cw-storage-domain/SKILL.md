@@ -17,7 +17,7 @@ File storage for attachments.
 
 **Events consumed**: `task.purged` (deletes its attachments).
 
-**External systems**: OVH Object Storage in production, MinIO locally.
+**External systems**: OVH Object Storage in production, Garage locally.
 
 **Mockup screens**: Attachments and their full-screen preview; Organisation › Quotas (largest files).
 
@@ -25,6 +25,17 @@ File storage for attachments.
 
 - 25 MB per file; the type is derived from the extension.
 - The service never streams file bytes through itself: clients use signed URLs.
+
+## Upload policy
+
+- Upload is a presigned POST valid 5 minutes, with imposed conditions: a size from 1 byte to 25 MB,
+  the key `org/<organizationId>/<uuid>` and the content type.
+- Finalizing an upload reads the first 4 KiB of the object and checks its real type with
+  `file-type`.
+- Download is a presigned URL served as an attachment; SVG and HTML are never displayed inline.
+- File metadata has a `scan_status` column from the first migration.
+- S3 client (`@aws-sdk/client-s3`): `requestChecksumCalculation: 'WHEN_REQUIRED'`; URLs are signed
+  for the host the browser sees.
 
 ## Notes
 

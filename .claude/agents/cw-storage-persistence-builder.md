@@ -47,6 +47,7 @@ Load them with the `Skill` tool when their subject comes up (if the tool is unav
 | --- | --- |
 | `cw-hexagonal-module-layout` | always |
 | `cw-expand-contract-migrations` | when a query needs a new column or index |
+| `cw-database-conventions` | always: naming, common columns, row-level security |
 
 ## Procedure
 
