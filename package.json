@@ -28,16 +28,22 @@
     "@aws-sdk/client-s3": "^3.1166.0",
     "@aws-sdk/s3-presigned-post": "^3.1166.0",
     "@aws-sdk/s3-request-presigner": "^3.1166.0",
+    "@cadenway/contracts": "^0.1.0",
+    "@cadenway/nest-common": "^0.1.1",
+    "@cadenway/nest-messaging": "^0.0.1",
     "@nestjs/common": "^12.4.2",
     "@nestjs/core": "^12.4.2",
     "@nestjs/platform-express": "^12.4.2",
+    "@opentelemetry/api": "^1.10.0",
     "drizzle-orm": "^0.45.4",
     "file-type": "^22.3.0",
     "pg": "^8.23.1",
     "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.2"
+    "rxjs": "^7.8.2",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
+    "@cadenway/nest-testing": "^0.0.1",
     "@commitlint/cli": "^21.2.4",
     "@commitlint/config-conventional": "^21.2.4",
     "@eslint/js": "^10.0.1",
