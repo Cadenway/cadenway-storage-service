@@ -4,9 +4,7 @@
 
 ## Status
 
-At the time this documentation was written, this checkout has no `package.json`, application source tree, or GitHub workflow files. The target architecture, scripts, and workflows in this guide must be created and verified during bootstrap.
-
-The following architecture is the target recorded in [AGENTS.md](../AGENTS.md). Paths and integrations are design boundaries, not evidence that files or services already exist.
+The checkout contains NestJS startup, health and configuration code. Business modules will follow the structure below as their capabilities are implemented.
 
 ## Purpose and target structure
 
@@ -24,6 +22,8 @@ cadenway-storage-service owns file storage for attachments. NestJS, its own Post
 Starts as a module of cadenway-task-service.
 
 ## Architectural ownership
+
+Follow the [Cadenway NestJS architecture reference](https://github.com/Cadenway/cadenway-service-kit/blob/main/docs/hexagonal-architecture.md) for module structure, dependency direction, naming and test placement.
 
 - Business code lives in modules under `src/modules/<module>/`, each with `domain/`, `application/`, `infrastructure/`, `api/` and a `MODULE.md`.
 - Cross-cutting plumbing (config, logging, tracing, errors, auth guards, messaging) comes from the cadenway-service-kit packages (`@cadenway/nest-common`, `@cadenway/nest-messaging`, `@cadenway/nest-testing`), never re-implemented here.
