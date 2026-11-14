@@ -17,9 +17,9 @@ cadenway-storage-service owns file storage for attachments. NestJS, its own Post
 | Emits      | `file.uploaded`, `file.deleted`                                                                                |
 | Listens to | `task.purged` (deletes its attachments)                                                                        |
 | External   | OVH Object Storage in production, Garage locally.                                                              |
-| Phase      | Extracted later, when needed                                                                                   |
+| Phase      | After the first version                                                                                        |
 
-Starts as a module of cadenway-task-service.
+Built in this repository from the start: it never lives as a module of another service.
 
 ## Architectural ownership
 
