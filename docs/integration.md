@@ -40,7 +40,9 @@ File storage for attachments.
 
 ## Notes
 
-Starts as a module of cadenway-task-service.
+Built in this repository from the start: it never lives as a module of another service.
+
+Decided: this service also holds avatars and organization logos, not only the files linked to a task or a comment.
 
 Everything above comes from the [repositories document](https://claude.ai/artifact/BPinmYxoF3mbK8w9BMB43N) and the
 [integration guide](https://claude.ai/artifact/CpJHVCiFfF9j3KbHQ2S1Et). If the mockup disagrees with this guide, update the guide and its source skill for both assistants.
