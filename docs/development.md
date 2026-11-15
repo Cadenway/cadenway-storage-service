@@ -82,21 +82,21 @@ value. `.env.example` holds a working local value for each;
 [cadenway-ops](https://github.com/Cadenway/cadenway-ops) (`docs/service-environment.md`) says where
 each value comes from on a server.
 
-| Variable                                   | Read by               | Value                                                                     |
-| ------------------------------------------ | --------------------- | ------------------------------------------------------------------------- |
-| `PORT`                                     | The service           | `3015`                                                                    |
-| `NODE_ENV`, `LOG_LEVEL`, `LOG_PRETTY`      | The service           | `production`, `info` and `false` when unset                               |
-| `DATABASE_URL`                             | The service           | Application role `storage_app`                                            |
-| `MIGRATION_DATABASE_URL`                   | `src/migrate.ts` only | Migrator role `storage_migrator`; required once a migration exists        |
-| `INTERNAL_TOKEN_AUDIENCE`                  | The service           | `storage-service`                                                         |
-| `INTERNAL_TOKEN_TRUSTED_ISSUERS`           | The service           | One line of JSON: the public keys of each backend allowed to call it      |
-| `OTEL_EXPORTER_OTLP_ENDPOINT`              | `src/telemetry.ts`    | OTLP over HTTP; unset, nothing leaves the process                         |
-| `NATS_URL`                                 | The service           | `nats://` URL of the broker                                               |
-| `NATS_USER`, `NATS_PASSWORD`               | The service           | User `storage` and its password; inbox prefix `_INBOX.storage`            |
-| `S3_ENDPOINT`, `S3_PUBLIC_ENDPOINT`        | Nothing yet           | Where the service reaches the object storage; the host of the signed URLs |
-| `S3_REGION`, `S3_BUCKET`                   | Nothing yet           | `garage` and `cadenway-local` locally                                     |
-| `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | Nothing yet           | The key of the bucket; a secret on a server                               |
-| `S3_FORCE_PATH_STYLE`                      | Nothing yet           | `true` for Garage                                                         |
+| Variable                                   | Read by               | Value                                                                                                                                                        |
+| ------------------------------------------ | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `PORT`                                     | The service           | `3015`                                                                                                                                                       |
+| `NODE_ENV`, `LOG_LEVEL`, `LOG_PRETTY`      | The service           | `production`, `info` and `false` when unset                                                                                                                  |
+| `DATABASE_URL`                             | The service           | Application role `storage_app`                                                                                                                               |
+| `MIGRATION_DATABASE_URL`                   | `src/migrate.ts` only | Migrator role `storage_migrator`; required once a migration exists. The GitOps agent passes it to the migration container only, never to the running service |
+| `INTERNAL_TOKEN_AUDIENCE`                  | The service           | `storage-service`                                                                                                                                            |
+| `INTERNAL_TOKEN_TRUSTED_ISSUERS`           | The service           | One line of JSON: the public keys of each backend allowed to call it                                                                                         |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`              | `src/telemetry.ts`    | OTLP over HTTP; unset, nothing leaves the process                                                                                                            |
+| `NATS_URL`                                 | The service           | `nats://` URL of the broker                                                                                                                                  |
+| `NATS_USER`, `NATS_PASSWORD`               | The service           | User `storage` and its password; inbox prefix `_INBOX.storage`                                                                                               |
+| `S3_ENDPOINT`, `S3_PUBLIC_ENDPOINT`        | Nothing yet           | Where the service reaches the object storage; the host of the signed URLs                                                                                    |
+| `S3_REGION`, `S3_BUCKET`                   | Nothing yet           | `garage` and `cadenway-local` locally                                                                                                                        |
+| `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | Nothing yet           | The key of the bucket; a secret on a server                                                                                                                  |
+| `S3_FORCE_PATH_STYLE`                      | Nothing yet           | `true` for Garage                                                                                                                                            |
 
 The seven `S3_*` variables are declared now, as cadenway-ops passes them, and join the schema with
 the code that reads them. Locally they point at the Garage of the cadenway-ops stack (`full`
