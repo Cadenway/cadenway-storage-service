@@ -90,5 +90,5 @@ subject here. An event of a new entity needs its `evt.<entity>.>` in cadenway-op
 
 Outbox rows are kept 7 days. A consumer that fell further behind is rebuilt: the owning service
 re-emits the current state of its entities with `RebuildEmitter` on `rebuild.<consumer>.<entity>`
-(`rebuild.search.file`), unacknowledged, the only mode the permissions allow. A service that emits
-events documents that use case in MODULE.md.
+(`rebuild.<consumer>.file` here), unacknowledged, the only mode the permissions allow. A service
+that emits events documents that use case in MODULE.md.
