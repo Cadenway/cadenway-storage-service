@@ -1,44 +1,45 @@
 ---
 name: cw-hexagonal-module-layout
-description: "Where each kind of code goes in a module (domain, application, infrastructure, api), the naming of files and classes, and the dependency direction. Load it before creating or moving a file."
+description: "Place files and review boundaries in a Cadenway NestJS module."
 ---
 
-# Module layout
+# V2 module layout
+
+The [Cadenway architecture reference](https://github.com/Cadenway/cadenway-service-kit/blob/main/docs/hexagonal-architecture.md) defines the V2 target.
+Follow the local layout while the repository uses its existing architecture check. Enable the
+strict convention once the checker is published and coordinate source migration separately.
 
 ```text
 src/modules/<module>/
-├─ domain/                 ← entities, value objects, domain errors, domain events (pure)
-├─ application/
-│  ├─ commands/            ← write use cases, named by action and subject
-│  ├─ queries/             ← read use cases
-│  └─ ports/               ← outbound interfaces, `<name>.port.ts`
-├─ api/
-│  ├─ http/                ← controllers, `<name>.controller.ts`
-│  └─ messaging/           ← incoming event and job handlers, `<name>.handler.ts`
-├─ infrastructure/
-│  ├─ persistence/         ← `<name>.schema.ts` and `<name>.repository.ts`
-│  └─ messaging/           ← wire event mapping and outbox adapter
-├─ <module>.module.ts
-└─ MODULE.md
+  MODULE.md
+  <module>.module.ts
+  public/<area>/<operation>.ts
+  domain/{aggregates,value-objects,policies,events,errors}/<area>/
+  application/use-cases/{commands,queries}/<area>/<operation>/
+  application/{models,projections,mappers,services}/<area>/
+  application/ports/outbound/<concern>/<area>/
+  presentation/http/{controllers,dto/input,dto/output,mappers,validation,errors,guards}/<resource>/
+  presentation/http/webhooks/<provider>/
+  presentation/messaging/handlers/<event-family>/
+  presentation/jobs/handlers/<job-family>/
+  presentation/websocket/gateways/<channel>/
+  presentation/cli/commands/<area>/
+  infrastructure/persistence/drizzle/{schemas,mappers,repositories,transactions}/<area>/
+  infrastructure/messaging/{outbox,rebuild}/<area>/
+  infrastructure/jobs/pg-boss/<area>/
+  infrastructure/adapters/<integration>/
+  composition/tokens/<area>/
+  composition/providers/{use-cases,adapters}/<area>/
 ```
 
-Dependencies point inward: `api → application → domain`, `infrastructure → application/domain`.
-Nothing in `domain/` imports another layer.
+Create folders as needed. Use `<operation>.use-case.ts`, `.input.ts` and `.output.ts` for the
+implementation and its named contracts. Keep one named exported type or interface per file. Keep
+private helper types with their implementation, and colocate tests with their subjects.
+Domain and application stay in plain TypeScript. Presentation calls application operations.
+Infrastructure implements application ports. The root Nest module registers controllers and
+providers. Composition holds the bindings.
 
-| Kind | File | Class |
-| --- | --- | --- |
-| Entity | `domain/task.ts` | `Task` |
-| Value object | `domain/task-status.ts` | `TaskStatus` |
-| Domain error | `domain/errors.ts` | `MilestoneEstimateError` |
-| Use case | `application/commands/change-task-status.ts` | `ChangeTaskStatus` |
-| Port | `application/ports/task-unit-of-work.port.ts` | `TaskUnitOfWork` (interface) |
-| Schema | `infrastructure/persistence/task.schema.ts` | none |
-| Repository | `infrastructure/persistence/drizzle-task.repository.ts` | `DrizzleTaskRepository` |
-| Controller | `api/http/tasks.controller.ts` | `TasksController` |
-| Event handler | `api/messaging/member-removed.handler.ts` | `MemberRemovedHandler` |
-
-Classes carry no `Service` or `Component` suffix unless NestJS requires a provider token name.
-
-`pnpm test:architecture` enforces these folders and suffixes. The
-[architecture reference](https://github.com/Cadenway/cadenway-service-kit/blob/main/docs/hexagonal-architecture.md)
-of the service kit is authoritative when this skill and the check disagree.
+Expose a use case with named re-exports in `public/<area>/<operation>.ts`, record the entry and
+consumers in `MODULE.md` and export the same provider in Nest. Its `execute` input and output can
+only reference public types, even through nested members. Instantiate use case classes in
+composition. Consumers bind their own outgoing ports to the exported operation.

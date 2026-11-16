@@ -5,6 +5,9 @@ paths:
 
 # Infrastructure layer
 
+- Under V2, organize Drizzle under `persistence/drizzle/{schemas,mappers,repositories,transactions}/<area>/`
+  and other adapters under `adapters/<integration>/`. Bind the ports in the module composition.
+
 - Repositories implement the ports declared by the application layer; they map rows to domain
   objects and back, nothing more.
 - Use the ORM already declared in package.json; never add a second one.

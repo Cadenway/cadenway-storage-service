@@ -32,7 +32,7 @@ Structure and boundaries, not style.
 4. Every route and event exists in the installed `@cadenway/contracts`.
 5. Every query is scoped by organization.
 6. NATS is reached only through `@cadenway/nest-messaging`; config, logs and errors through `@cadenway/nest-common`.
-7. MODULE.md is updated when a public API, an event or an invariant changes.
+7. MODULE.md covers public entries and their exact consumers. Check named re-exports, public execute types and Nest exports under V2.
 
 ## Review method
 
