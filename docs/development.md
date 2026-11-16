@@ -152,7 +152,7 @@ in its changeset: upgrade the package, generate, review the new migration.
 
 ### Integration tests
 
-`pnpm test:integration` needs Docker. `test/service-wiring.int-spec.ts` starts PostgreSQL, NATS and
+`pnpm test:integration` needs Docker. `tests/service-wiring.int-spec.ts` starts PostgreSQL, NATS and
 `nats-streams` from `compose.dev.yaml` as a throwaway Compose project on free ports (the data of the
 dev stack is never touched), applies the migrations with `src/migrate.ts` as the migrator role, and
 assembles the application as `main.ts` does, as `storage_app` and the NATS user `storage`. It checks

@@ -91,7 +91,7 @@ check that writes files. No agent delegates further.
 | `api.md` | API layer | `src/modules/**/api/**`, `src/**/*.controller.ts` |
 | `events.md` | Events | `src/**/*.events.ts`, `src/**/*.handler.ts`, `src/**/*.publisher.ts`, `src/**/events/**` |
 | `migrations.md` | Migrations | `migrations/**`, `src/**/migrations/**` |
-| `tests.md` | Tests | `**/*.spec.ts`, `test/**` |
+| `tests.md` | Tests | `**/*.spec.ts`, `tests/**` |
 | `deploy.md` | Deployment files | `Dockerfile`, `deploy/**`, `compose.dev.yaml`, `.env.example` |
 | `module-docs.md` | MODULE.md | `src/modules/**/MODULE.md` |
 | `language.md` | Language | always |
