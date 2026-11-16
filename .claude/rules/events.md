@@ -8,6 +8,9 @@ paths:
 
 # Events
 
+- Under V2, put incoming events in `presentation/messaging/handlers/<event-family>/` and job
+  handlers in `presentation/jobs/handlers/<job-family>/`.
+
 - Event names: `<entity>.<past-tense-fact>.v<version>`; the payload is the AsyncAPI schema of the
   installed `@cadenway/contracts`.
 - Publish only through the outbox of `@cadenway/nest-messaging`, in the use case transaction. Never a

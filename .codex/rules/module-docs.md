@@ -5,6 +5,10 @@ paths:
 
 # MODULE.md
 
+- Under V2, use `public/<area>/<operation>` entries and document the named provider exported by
+  Nest. The `execute` signature uses only public types, including nested types. Keep documentation
+  accurate for modules still using the existing layout.
+
 - Sections: Purpose, Public entry points, Owned tables, API, Events emitted, Events consumed,
   Invariants, Transactions, Decisions. Use the [module template](https://github.com/Cadenway/cadenway-service-kit/blob/main/docs/hexagonal-architecture.md#modulemd-template).
 - In Public entry points, declare owner-relative paths without `.ts` in an `Entry point | Consumers`

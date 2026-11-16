@@ -5,6 +5,10 @@ paths:
 
 # Application layer
 
+- Under V2, group use cases at `application/use-cases/{commands,queries}/<area>/<operation>/`
+  and ports at `application/ports/outbound/<concern>/<area>/`. Each named exported contract
+  has its own file. Keep the application framework-free.
+
 - One use case per class, with explicit input and output types; the name says the intent
   (`ChangeTaskStatus`, `ListSprintTasks`).
 - A write use case owns its transaction through a unit-of-work port. Load, persist and append

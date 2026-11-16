@@ -22,6 +22,8 @@
 
 ## Boundaries (hard rules)
 
+- Follow the V2 module reference and the rollout rules in [AGENTS.md](AGENTS.md).
+
 - No access to another service's database or internal code; cross-service needs use `@cadenway/contracts` routes or events.
 - NATS only through `@cadenway/nest-messaging`; config, logs, errors, health and auth guards through `@cadenway/nest-common`.
 - Routes and event payloads come from the installed `@cadenway/contracts`; never redefine them locally.

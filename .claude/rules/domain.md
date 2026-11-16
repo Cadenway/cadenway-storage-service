@@ -5,6 +5,9 @@ paths:
 
 # Domain layer
 
+- Under V2, group types under `domain/{aggregates,value-objects,policies,events,errors}/<area>/`.
+  Keep each named exported type or interface in its own file.
+
 - Plain TypeScript only: no NestJS decorator, no ORM entity, no import from `infrastructure/`, `api/`
   or `@nestjs/*`. The domain must run in a unit test without a Nest module.
 - An invalid state is impossible to build: constructors and methods refuse it with a typed domain

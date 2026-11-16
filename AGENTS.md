@@ -46,7 +46,17 @@ Built in this repository from the start: it never lives as a module of another s
 
 See the [Cadenway NestJS architecture reference](https://github.com/Cadenway/cadenway-service-kit/blob/main/docs/hexagonal-architecture.md) for dependency and test rules.
 
-- Business code lives in modules under `src/modules/<module>/`, each with `domain/`, `application/`, `infrastructure/`, `api/` and a `MODULE.md`.
+- The V2 target places each capability in `src/modules/<module>/`, with root `MODULE.md` and
+  `<module>.module.ts`. Add `domain/`, `application/`, `presentation/`, `infrastructure/`,
+  `composition/` and `public/` for the responsibilities it uses.
+- Group cases by area and operation, separate named contracts into their own files, and keep
+  domain and application free of Nest and adapter dependencies. The
+  [module layout skill](.codex/skills/cw-hexagonal-module-layout/SKILL.md) gives the exact paths.
+- Declare public paths and consumers in `MODULE.md`. Bind calls to other modules behind the
+  consumer's own port. Public use case signatures expose only explicitly published types.
+- While the repository uses the existing architecture suite, follow the checked-out layout and
+  document the paths each module exposes. Adopt the V2 checker once the package is published and
+  update the source layout in separately scoped changes.
 - Cross-cutting plumbing (config, logging, tracing, errors, auth guards, messaging) comes from the cadenway-service-kit packages (`@cadenway/nest-common`, `@cadenway/nest-messaging`); development-only `@cadenway/nest-testing` is maintained in [cadenway-tooling](https://github.com/Cadenway/cadenway-tooling).
 - The domain is pure; use cases own transactions; controllers and handlers translate.
 - Rendering of anything user-facing belongs to the webapp; this service returns data and stable error codes.
@@ -79,14 +89,14 @@ The scripts below are this repository's contract. While the repository is being 
 create them with these exact names; afterwards, use them and never an ad-hoc equivalent. Run the
 narrowest check that covers the change first, then widen:
 
-| Changed                         | Minimum check                                                |
-| ------------------------------- | ------------------------------------------------------------ |
-| Domain or use case code         | `pnpm test <module>`, then `pnpm test:coverage`              |
-| Persistence, events, migrations | `pnpm test:integration <module>`                             |
-| Routes                          | `pnpm test <module>/api` and the contract tests              |
-| Any source                      | `pnpm format:check`, `pnpm lint`, `pnpm typecheck`           |
-| Build or runtime configuration  | `pnpm build`, `docker compose -f compose.dev.yaml config -q` |
-| Docs or agent instructions only | Scoped formatting and link review                            |
+| Changed                         | Minimum check                                                                              |
+| ------------------------------- | ------------------------------------------------------------------------------------------ |
+| Domain or use case code         | `pnpm test <module>`, then `pnpm test:coverage`                                            |
+| Persistence, events, migrations | `pnpm test:integration <module>`                                                           |
+| Routes                          | `pnpm test <module>/presentation` (`/api` in the existing layout), then the contract tests |
+| Any source                      | `pnpm format:check`, `pnpm lint`, `pnpm typecheck`                                         |
+| Build or runtime configuration  | `pnpm build`, `docker compose -f compose.dev.yaml config -q`                               |
+| Docs or agent instructions only | Scoped formatting and link review                                                          |
 
 Report the commands you actually ran and their results; a check you did not run is reported as not
 run.

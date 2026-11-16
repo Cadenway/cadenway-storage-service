@@ -1,6 +1,6 @@
 ---
 name: cw-storage-module-builder
-description: "Use to create a new module in cadenway-storage-service: the domain/application/infrastructure/api folders, the Nest module wiring and a normative MODULE.md. Writes code; the content of each layer belongs to its own builder."
+description: "Use to create a new module in cadenway-storage-service: the V2 capability folders, the Nest module wiring and a normative MODULE.md. Writes code; the content of each layer belongs to its own builder."
 tools: Skill, Read, Grep, Glob, Edit, Write, Bash
 model: opus
 effort: high
@@ -56,9 +56,9 @@ Load them with the `Skill` tool when their subject comes up (if the tool is unav
 ## Procedure
 
 1. Confirm the module does not already exist under another name (Grep the domain terms).
-2. Create `src/modules/<module>/{domain,application,infrastructure,api}` and `<module>.module.ts`; register it in `app.module.ts`.
+2. Create the module root, initialize the V2 folders that are needed according to the layout skill and register `<module>.module.ts` in `app.module.ts`. Preserve the installed layout until strict adoption.
 3. Write MODULE.md: purpose, owned tables, public API, events in and out, invariants.
-4. Add an empty spec folder for each layer only when a first test exists.
+4. Colocate specs with the source they cover. Create no empty spec directories.
 
 ## Checks
 
