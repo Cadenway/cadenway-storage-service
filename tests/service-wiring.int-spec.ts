@@ -64,6 +64,9 @@ const platformTables = [
   'processed_events',
 ] as const;
 
+/** Migrations of `migrations/meta/_journal.json`. */
+const migrationCount = 2;
+
 /**
  * Runs `docker compose` on the throwaway project.
  *
@@ -321,7 +324,7 @@ describe('storage-service wiring', () => {
     expect(tables.rows).toEqual(
       platformTables.map((tablename) => ({ tablename, tableowner: 'storage_migrator' })),
     );
-    expect(journal.rows).toEqual([{ applied: 1 }]);
+    expect(journal.rows).toEqual([{ applied: migrationCount }]);
   });
 
   it('applies nothing when the migrator runs again', async () => {
@@ -330,7 +333,7 @@ describe('storage-service wiring', () => {
     const journal = await migrator.query<{ applied: number }>(
       'select count(*)::int as applied from drizzle.__drizzle_migrations',
     );
-    expect(journal.rows).toEqual([{ applied: 1 }]);
+    expect(journal.rows).toEqual([{ applied: migrationCount }]);
   });
 
   it('forces row-level security on the tables that carry an organization', async () => {
@@ -526,7 +529,7 @@ describe('storage-service wiring', () => {
     const journal = await migrator.query<{ applied: number }>(
       'select count(*)::int as applied from drizzle.__drizzle_migrations',
     );
-    expect(journal.rows).toEqual([{ applied: 1 }]);
+    expect(journal.rows).toEqual([{ applied: migrationCount }]);
   });
 
   it('runs the outbox relay from the start, and it stays healthy against an empty outbox', async () => {
