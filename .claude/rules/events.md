@@ -18,3 +18,9 @@ paths:
 - Handlers deduplicate on the event id and call a use case; they never write another service's data.
 - A shape change is a new version; the old one keeps being emitted until every consumer moved.
 - Events emitted by this service: `file.uploaded`, `file.deleted`.
+
+## Review example
+
+For example, an integration test for a changed consumer can deliver the same event twice and
+assert a single business effect. For a write that emits an event, exercise a failed outbox write
+and verify that the domain data rolls back with it.

@@ -3,6 +3,6 @@ name: cw-contract-review
 description: Compare routes and events with cadenway-api-contracts.
 ---
 
-Use the **cw-storage-contract-reviewer** specialist for this task when delegation is available and authorized; otherwise read `.codex/agents/cw-storage-contract-reviewer.toml` and follow its instructions directly: the user-provided arguments
-
-The agent carries its own procedure and rules; do not restate them.
+Delegate the user's arguments to **cw-storage-contract-reviewer** if delegation is available and authorized.
+Otherwise read and follow `.codex/agents/cw-storage-contract-reviewer.toml` directly with those arguments.
+Do not restate its rules or procedure.

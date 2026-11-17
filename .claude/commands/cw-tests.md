@@ -3,6 +3,4 @@ description: "Write unit, integration or contract tests."
 argument-hint: "<behavior or file>"
 ---
 
-Delegate to the **cw-storage-test-writer** subagent: $ARGUMENTS
-
-The agent carries its own procedure and rules; do not restate them.
+Delegate to subagent **cw-storage-test-writer** without restating its rules or procedure: $ARGUMENTS

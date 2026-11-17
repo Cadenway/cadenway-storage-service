@@ -5,10 +5,7 @@ paths:
 
 # Application layer
 
-- Under V2, group use cases at `application/use-cases/{commands,queries}/<area>/<operation>/`
-  and ports at `application/ports/outbound/<concern>/<area>/`. Each named exported contract
-  has its own file. Keep the application framework-free.
-
+- Use the [V2 module layout](../skills/cw-hexagonal-module-layout/SKILL.md) for operations, ports and named contracts. Keep application framework-free.
 - One use case per class, with explicit input and output types; the name says the intent
   (`ChangeTaskStatus`, `ListSprintTasks`).
 - A write use case owns its transaction through a unit-of-work port. Load, persist and append
