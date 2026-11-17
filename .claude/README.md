@@ -1,8 +1,7 @@
 # cadenway-storage-service: Claude Code tooling
 
-This `.claude/` folder ships the Claude Code tooling of cadenway-storage-service: **16 agents**,
-17 slash commands, 13 rules, 21 skills, 3 hooks, the project
-settings and launch configuration. The application launch requires the planned package scripts.
+This directory contains the repository's Claude Code agents, commands, scoped rules, skills,
+hooks and project settings. The tables below explain when to use them.
 
 Start from [AGENTS.md](../AGENTS.md) (the rules every assistant follows) and [CLAUDE.md](../CLAUDE.md)
 (the Claude entry point).
@@ -88,10 +87,10 @@ check that writes files. No agent delegates further.
 | `domain.md` | Domain layer | `src/modules/**/domain/**` |
 | `application.md` | Application layer | `src/modules/**/application/**` |
 | `infrastructure.md` | Infrastructure layer | `src/modules/**/infrastructure/**` |
-| `api.md` | API layer | `src/modules/**/api/**`, `src/**/*.controller.ts` |
+| `api.md` | API layer | `src/modules/**/api/**`, `src/modules/**/presentation/**`, `src/**/*.controller.ts` |
 | `events.md` | Events | `src/**/*.events.ts`, `src/**/*.handler.ts`, `src/**/*.publisher.ts`, `src/**/events/**` |
 | `migrations.md` | Migrations | `migrations/**`, `src/**/migrations/**` |
-| `tests.md` | Tests | `**/*.spec.ts`, `tests/**` |
+| `tests.md` | Tests | `**/*.spec.ts`, `src/**/*.int-spec.ts`, `tests/**` |
 | `deploy.md` | Deployment files | `Dockerfile`, `deploy/**`, `compose.dev.yaml`, `.env.example` |
 | `module-docs.md` | MODULE.md | `src/modules/**/MODULE.md` |
 | `language.md` | Language | always |

@@ -9,27 +9,24 @@ and [Codex](.codex/README.md) for agents, skills, commands and hooks.
 
 ## First read
 
-- The `MODULE.md` of the module you touch, and `src/app.module.ts` for the module list.
-- `@cadenway/contracts` (installed) and `../cadenway-api-contracts`: `openapi/internal/storage-service.yaml` and `asyncapi/storage-service.yaml`.
-- The [repositories document](https://claude.ai/artifact/BPinmYxoF3mbK8w9BMB43N), section "cadenway-storage-service", and the data model of the [integration guide](https://claude.ai/artifact/CpJHVCiFfF9j3KbHQ2S1Et).
+- Before module edits, read its `MODULE.md`, the installed `@cadenway/contracts` entry and the
+  `cw-storage-domain` skill. Use `src/app.module.ts` for module inventory.
+- For HTTP and events, consult `../cadenway-api-contracts/openapi/internal/storage-service.yaml`
+  or `../cadenway-api-contracts/asyncapi/storage-service.yaml` as applicable. Use `cw-contract-first`
+  before adding or changing either.
+- For product decisions, use the repository's section of the repositories document and the
+  integration guide's data model. See [References](#references).
 - The mockup screens this service serves: Attachments and their full-screen preview; Organisation › Quotas (largest files).
-- `package.json` for versions and scripts once the repository is bootstrapped. Do not restate
-  versions elsewhere: a copy goes stale.
+- Use `package.json` for available scripts and versions. Keep versions in the manifest.
 
 ## What this repository is
 
-The structure and workflows below describe the bootstrap target. Check the checkout for available files and commands.
+cadenway-storage-service owns file storage for attachments. The local port is 3015. Its NestJS runtime uses a
+service-owned PostgreSQL database with separate migrator and application roles, NATS JetStream
+via `@cadenway/nest-messaging`, and internal REST.
 
-cadenway-storage-service owns file storage for attachments. NestJS, its own PostgreSQL database (one database with a migrator role and an application role in the shared PostgreSQL of the VPS), events over NATS JetStream through `@cadenway/nest-messaging`, internal REST for the API gateway. Local port 3015.
-
-|            |                                                                                                                |
-| ---------- | -------------------------------------------------------------------------------------------------------------- |
-| Data       | File metadata (name, type, size, author, linked task or comment); the files themselves live in object storage. |
-| API        | Signed upload and download URLs, the 25 MB per-file limit, an organization's largest files.                    |
-| Emits      | `file.uploaded`, `file.deleted`                                                                                |
-| Listens to | `task.purged` (deletes its attachments)                                                                        |
-| External   | OVH Object Storage in production, Garage locally.                                                              |
-| Phase      | After the first version                                                                                        |
+Check the checkout for implemented capabilities. See the [ownership and contract map](docs/architecture.md#purpose-and-target-structure)
+for data, APIs, emitted and consumed events, external systems and rollout.
 
 Built in this repository from the start: it never lives as a module of another service.
 
@@ -44,22 +41,20 @@ Built in this repository from the start: it never lives as a module of another s
 
 ## Architectural ownership
 
-See the [Cadenway NestJS architecture reference](https://github.com/Cadenway/cadenway-service-kit/blob/main/docs/hexagonal-architecture.md) for dependency and test rules.
-
-- The V2 target places each capability in `src/modules/<module>/`, with root `MODULE.md` and
-  `<module>.module.ts`. Add `domain/`, `application/`, `presentation/`, `infrastructure/`,
-  `composition/` and `public/` for the responsibilities it uses.
-- Group cases by area and operation, separate named contracts into their own files, and keep
-  domain and application free of Nest and adapter dependencies. The
-  [module layout skill](.codex/skills/cw-hexagonal-module-layout/SKILL.md) gives the exact paths.
-- Declare public paths and consumers in `MODULE.md`. Bind calls to other modules behind the
-  consumer's own port. Public use case signatures expose only explicitly published types.
-- While the repository uses the existing architecture suite, follow the checked-out layout and
-  document the paths each module exposes. Adopt the V2 checker once the package is published and
-  update the source layout in separately scoped changes.
-- Cross-cutting plumbing (config, logging, tracing, errors, auth guards, messaging) comes from the cadenway-service-kit packages (`@cadenway/nest-common`, `@cadenway/nest-messaging`); development-only `@cadenway/nest-testing` is maintained in [cadenway-tooling](https://github.com/Cadenway/cadenway-tooling).
-- The domain is pure; use cases own transactions; controllers and handlers translate.
-- Rendering of anything user-facing belongs to the webapp; this service returns data and stable error codes.
+- Read `cw-hexagonal-module-layout` before placing files. Use `MODULE.md` for public paths and
+  consumers, and bind cross-module calls through consumer-owned ports. Keep TypeScript strict
+  with explicit types and `readonly`, without `any` or non-null assertions.
+- Follow the checked-out layout and declare exposed paths while using the existing checker.
+  Adopt the V2 checker after publication and migrate the source in separate, scoped changes.
+- Domain and application are pure TypeScript. Write use cases own transactions. Presentation
+  adapters validate, map and delegate. Dependencies point inward. Scope queries to the caller's
+  organization from the request context.
+- Follow the scoped application and event rules for the transactional outbox, idempotent
+  handlers and versioned shapes. Use expand/contract migrations that keep the running version
+  working, per the migration rule.
+- Use cadenway-service-kit for shared runtime plumbing. [Cadenway tooling](https://github.com/Cadenway/cadenway-tooling)
+  owns the development-only `@cadenway/nest-testing` package. The webapp renders user-facing
+  output. This service returns data and stable error codes.
 
 ## Boundaries (hard rules)
 
@@ -71,46 +66,45 @@ See the [Cadenway NestJS architecture reference](https://github.com/Cadenway/cad
 
 ## GitHub files (`.github/`)
 
-This repository carries everything GitHub reads from it; Cadenway has no organization `.github`
-repository and nothing is inherited.
+Use the matching `github.md` rule in the active assistant's rules directory for files,
+workflows and cross-repository changes. [`.github/README.md`](.github/README.md) is the
+repository home page. Keep CI, release and deploy workflows and Renovate configuration
+complete in this repository. Use local Renovate settings without a shared preset. Shared
+changes ship through each owning repository's pull request.
 
-- [`.github/README.md`](.github/README.md) is the repository home page; `CONTRIBUTING.md`,
-  `CODE_OF_CONDUCT.md`, `SECURITY.md`, `SUPPORT.md`, `PULL_REQUEST_TEMPLATE.md`, `ISSUE_TEMPLATE/` and
-  `CODEOWNERS` sit next to it.
-- `.github/workflows/` holds this repository's complete CI, release and deploy workflows: no reusable
-  workflow from another repository. The Renovate configuration is complete here too, with no shared
-  preset.
-- The parts shared with the other repositories are duplicated on purpose; a change to them is repeated
-  in each repository through its own pull request.
+## Code quality
+
+- Read the affected entry point, its callers, and its relevant tests before editing.
+  Preserve the behavior callers rely on unless the task changes it.
+- Keep the diff focused. Use names that express intent and reuse existing code when
+  it preserves the required behavior. Extract code when it clarifies a responsibility.
+- Keep business decisions with their owning module. Validate external inputs at the
+  boundary and use documented public interfaces across modules and repositories.
+- For writes that can fail, overlap, or be retried, verify the resulting state.
+  Check transaction boundaries, tenant scope, and repeated delivery where relevant.
+- For collections and repeated work, check what grows with input size. Measure or
+  inspect the bottleneck before adding an index, cache, worker, or replica.
+- Run the repository checks that cover the affected behavior. Report the commands
+  and their results, including checks that did not run and tests that selected zero cases.
 
 ## Commands and quality gates
 
-The scripts below are this repository's contract. While the repository is being bootstrapped,
-create them with these exact names; afterwards, use them and never an ad-hoc equivalent. Run the
-narrowest check that covers the change first, then widen:
+Use the [minimum checks by change](docs/development.md#minimum-checks-by-change) and the
+[full local quality gate](docs/development.md#full-local-quality-gate). Use the documented
+scripts or add them under those names during bootstrap. Start with the narrowest check.
 
-| Changed                         | Minimum check                                                                              |
-| ------------------------------- | ------------------------------------------------------------------------------------------ |
-| Domain or use case code         | `pnpm test <module>`, then `pnpm test:coverage`                                            |
-| Persistence, events, migrations | `pnpm test:integration <module>`                                                           |
-| Routes                          | `pnpm test <module>/presentation` (`/api` in the existing layout), then the contract tests |
-| Any source                      | `pnpm format:check`, `pnpm lint`, `pnpm typecheck`                                         |
-| Build or runtime configuration  | `pnpm build`, `docker compose -f compose.dev.yaml config -q`                               |
-| Docs or agent instructions only | Scoped formatting and link review                                                          |
-
-Report the commands you actually ran and their results; a check you did not run is reported as not
-run.
+For routes, use `pnpm test <module>/presentation` in V2 or `pnpm test <module>/api` in the
+existing layout, then the contract tests. Report results for commands run and identify
+unrun checks.
 
 ## Git and branch flow
 
-- Trunk-based: work branches come from `main`, named `<type>/<lowercase-kebab-description>` with a
-  type among `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`,
-  `revert`; put the Cadenway task id first when there is one (`feat/cad-482-sso-screen`). Never an
-  agent name as a prefix. Validate with `git check-ref-format --branch <name>`.
-- Commits and PR titles follow Conventional Commits: `type(scope): subject`, English, imperative,
-  lowercase subject, no trailing period, at most 100 characters; `!` only for a breaking change.
-- Pull requests target `main` and are squash-merged after review and green CI. release-please opens the release pull request; its merge tags the version, publishes the image to GHCR, and the deploy workflow of this repository (`.github/workflows/deploy.yml`) writes the new version into cadenway-ops (staging, then production after approval).
-- Stage only the files of your task; preserve other people's changes in the working tree.
+Branch from `main` and validate with `git check-ref-format --branch <name>`. Follow the
+matching `git-and-commits.md` rule for branch names, Conventional Commits and scoped staging.
+
+Pull requests target `main` and squash-merge after review and green CI. release-please opens
+the release PR. Its merge tags and publishes the GHCR image. [The deploy workflow](.github/workflows/deploy.yml)
+updates cadenway-ops staging, then production after approval.
 
 ## Hard limits (never without the user's explicit request in this conversation)
 
@@ -131,14 +125,11 @@ not to find another way around it.
 
 ## Agent tooling
 
-- **Claude Code**: [CLAUDE.md](CLAUDE.md) and [.claude/README.md](.claude/README.md): the
-  `cw-storage-*` agents, the `/cw-*` commands (`/cw-quality` runs the whole local gate),
-  path-scoped rules and hooks.
-- **Codex**: [.codex/README.md](.codex/README.md) covers the specialists, `$cw-*` skills, rules and hooks.
-- **Builders** (assigned writes): `cw-storage-module-builder`, `cw-storage-domain-builder`, `cw-storage-usecase-builder`, `cw-storage-endpoint-builder`, `cw-storage-event-builder`, `cw-storage-persistence-builder`, `cw-storage-migration-builder`, `cw-storage-test-writer`, `cw-storage-deploy-maintainer`, `cw-storage-github-maintainer`.
-- **Reviewers** (read-only): `cw-storage-module-explorer`, `cw-storage-architecture-reviewer`, `cw-storage-contract-reviewer`, `cw-storage-security-auditor`, `cw-storage-observability-reviewer`, `cw-storage-performance-reviewer`.
-- Specialists are available, not mandatory. Delegate a bounded responsibility with explicit files and
-  checks, assign disjoint files to parallel agents and integrate their results yourself.
+Use the [Codex](.codex/README.md) or [Claude Code](.claude/README.md) guide to find specialists,
+commands, skills and hooks. Read the applicable scoped rules for the active assistant.
+
+Specialists are optional. Assign bounded, disjoint files and checks to builders. Keep reviewers
+read-only and integrate their results.
 
 ## Repository hygiene
 

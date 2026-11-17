@@ -1,6 +1,7 @@
 ---
 paths:
   - '**/*.spec.ts'
+  - 'src/**/*.int-spec.ts'
   - 'tests/**'
 ---
 
@@ -12,3 +13,5 @@ paths:
 - Name tests after the behavior and the rule (`refuses a milestone with an estimate`).
 - Fixtures come from the mockup data: Atelier Nord, Camille Martin (CM), Sprint 14, CAD-482.
 - Never mock the database in an integration test; never assert on log text.
+- Use the focused unit or integration procedure in `docs/development.md`. Report the executed
+  test count. A run with zero tests leaves the behavior unverified.

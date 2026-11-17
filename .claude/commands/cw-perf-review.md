@@ -3,6 +3,4 @@ description: "Review queries, indexes and pagination."
 argument-hint: "[files]"
 ---
 
-Delegate to the **cw-storage-performance-reviewer** subagent: $ARGUMENTS
-
-The agent carries its own procedure and rules; do not restate them.
+Delegate to subagent **cw-storage-performance-reviewer** without restating its rules or procedure: $ARGUMENTS
