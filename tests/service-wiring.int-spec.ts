@@ -35,12 +35,15 @@ import type { AttachmentObjectStore } from '../src/modules/attachments/applicati
 import { CleanPurgedTask } from '../src/modules/attachments/application/use-cases/commands/attachment/clean-purged-task/clean-purged-task.use-case.js';
 import { CleanAttachmentObjects } from '../src/modules/attachments/application/use-cases/commands/attachment/clean-attachment-objects/clean-attachment-objects.use-case.js';
 import { StartAttachmentUpload } from '../src/modules/attachments/application/use-cases/commands/attachment/start-attachment-upload/start-attachment-upload.use-case.js';
+import { IntakeAttachment } from '../src/modules/attachments/domain/aggregates/intake-attachment/intake-attachment.aggregate.js';
 import { UploadReceiptCodec } from '../src/modules/attachments/infrastructure/adapters/crypto/upload-receipt.codec.js';
 import { PostgresAttachmentRuntime } from '../src/modules/attachments/infrastructure/adapters/runtime/postgres-attachment-runtime.adapter.js';
 import { DrizzleAttachmentCleanupDiscovery } from '../src/modules/attachments/infrastructure/persistence/drizzle/repositories/attachment/drizzle-attachment-cleanup-discovery.repository.js';
 import { DrizzleAttachmentReader } from '../src/modules/attachments/infrastructure/persistence/drizzle/repositories/attachment/drizzle-attachment-reader.repository.js';
 import { DrizzleAttachmentReconciliation } from '../src/modules/attachments/infrastructure/persistence/drizzle/repositories/attachment/drizzle-attachment-reconciliation.repository.js';
 import { DrizzleAttachmentTransaction } from '../src/modules/attachments/infrastructure/persistence/drizzle/repositories/attachment/drizzle-attachment-transaction.repository.js';
+import { DrizzleExpiredUploadReceipts } from '../src/modules/attachments/infrastructure/persistence/drizzle/repositories/attachment/drizzle-expired-upload-receipts.repository.js';
+import { DrizzleIntakeAttachmentTransaction } from '../src/modules/attachments/infrastructure/persistence/drizzle/repositories/attachment/drizzle-intake-attachment-transaction.repository.js';
 import { DrizzleAttachmentCleanupUnitOfWork } from '../src/modules/attachments/infrastructure/persistence/drizzle/transactions/attachment/drizzle-attachment-cleanup.unit-of-work.js';
 
 // The service as main.ts assembles it, on a disposable PostgreSQL and NATS.
@@ -87,7 +90,12 @@ const attachmentTables = [
   'attachment_task_tombstones',
   'attachment_upload_claims',
   'attachments',
+  'intake_attachment_candidates',
+  'intake_attachment_upload_claims',
+  'intake_attachments',
 ] as const;
+
+const serviceTables = [...attachmentTables, ...platformTables].sort();
 
 /**
  * Runs `docker compose` on the throwaway project.
@@ -339,12 +347,12 @@ describe('storage-service wiring', () => {
     );
 
     expect(tables.rows).toEqual(
-      [...attachmentTables, ...platformTables].map((tablename) => ({
+      serviceTables.map((tablename) => ({
         tablename,
         tableowner: 'storage_migrator',
       })),
     );
-    expect(journal.rows).toEqual([{ applied: 2 }]);
+    expect(journal.rows).toEqual([{ applied: 3 }]);
   });
 
   it('applies nothing when the migrator runs again', async () => {
@@ -353,7 +361,7 @@ describe('storage-service wiring', () => {
     const journal = await migrator.query<{ applied: number }>(
       'select count(*)::int as applied from drizzle.__drizzle_migrations',
     );
-    expect(journal.rows).toEqual([{ applied: 2 }]);
+    expect(journal.rows).toEqual([{ applied: 3 }]);
   });
 
   it('provisions all scheduled cleanup queues with the migrator', async () => {
@@ -385,35 +393,31 @@ describe('storage-service wiring', () => {
       `select tablename, policyname from pg_policies where schemaname = 'public' order by tablename`,
     );
 
-    expect(tables.rows).toEqual([
-      ...attachmentTables.map((relname) => ({
+    expect(tables.rows).toEqual(
+      serviceTables.map((relname) => ({
         relname,
-        relrowsecurity: true,
-        relforcerowsecurity: true,
+        relrowsecurity: relname !== 'processed_events',
+        relforcerowsecurity: relname !== 'processed_events',
       })),
-      { relname: 'event_versions', relrowsecurity: true, relforcerowsecurity: true },
-      { relname: 'idempotency_keys', relrowsecurity: true, relforcerowsecurity: true },
-      { relname: 'outbox_events', relrowsecurity: true, relforcerowsecurity: true },
-      { relname: 'processed_events', relrowsecurity: false, relforcerowsecurity: false },
-    ]);
-    expect(policies.rows).toEqual([
-      ...attachmentTables.map((tablename) => ({
-        tablename,
-        policyname:
-          tablename === 'attachment_reconciliation_cursors'
-            ? 'attachment_reconciliation_system_access'
-            : `${tablename}_organization_isolation`,
-      })),
-      { tablename: 'event_versions', policyname: 'event_versions_organization_isolation' },
-      { tablename: 'idempotency_keys', policyname: 'idempotency_keys_organization_isolation' },
-      { tablename: 'outbox_events', policyname: 'outbox_events_organization_isolation' },
-    ]);
+    );
+    expect(policies.rows).toEqual(
+      serviceTables
+        .filter((table) => table !== 'processed_events')
+        .map((tablename) => ({
+          tablename,
+          policyname:
+            tablename === 'attachment_reconciliation_cursors'
+              ? 'attachment_reconciliation_system_access'
+              : `${tablename}_organization_isolation`,
+        })),
+    );
   });
 
   it('isolates attachment metadata, candidates, purge records and upload claims by organization', async () => {
     const tenant = service().get(TenantTransactionRunner);
     const attachmentId = randomUUID();
     const objectKey = `org/${atelierNordId}/${attachmentId}`;
+    const publicationId = '019a7001-2b3c-7d4e-8f5a-6b7c8d9e0f12';
     const statements: readonly { readonly sql: string; readonly values: readonly unknown[] }[] = [
       {
         sql: `insert into attachments
@@ -447,6 +451,23 @@ describe('storage-service wiring', () => {
           Buffer.from([1, 2, 3]),
           Buffer.alloc(16),
         ],
+      },
+      {
+        sql: `insert into intake_attachments (organization_id, publication_id, id, status, decided_at)
+          values ($1, $2, $3, 'released', now())`,
+        values: [atelierNordId, publicationId, attachmentId],
+      },
+      {
+        sql: `insert into intake_attachment_candidates
+          (organization_id, publication_id, attachment_id, object_key, status, cleanup_after)
+          values ($1, $2, $3, $4, 'fenced', now() + interval '5 minutes')`,
+        values: [atelierNordId, publicationId, attachmentId, `intake/${attachmentId}`],
+      },
+      {
+        sql: `insert into intake_attachment_upload_claims
+          (organization_id, publication_id, attachment_id, fingerprint, expires_at)
+          values ($1, $2, $3, 'test-fingerprint', now() + interval '1 day')`,
+        values: [atelierNordId, publicationId, attachmentId],
       },
     ];
 
@@ -491,6 +512,117 @@ describe('storage-service wiring', () => {
           await tx.client.query(`delete from ${table}`);
         }
       }),
+    );
+  });
+
+  it('shares the receipt cleanup batch limit with intake and preserves unexpired receipts', async () => {
+    const system: SystemTransactionRunner = service().get(SystemTransactionRunner);
+    const purge = new DrizzleExpiredUploadReceipts(system);
+    const publicationId = '019a7001-2b3c-7d4e-8f5a-6b7c8d9e0f12';
+    await system.run(async (tx) => {
+      await tx.client.query(
+        `insert into attachment_upload_claims
+          (organization_id, actor_id, task_key, key_digest, fingerprint, expires_at)
+          values ($1, $2, 'CAD-483', 'receipt-cleanup-test', 'test', now() - interval '1 hour')`,
+        [atelierNordId, camilleMartinId],
+      );
+      await tx.client.query(
+        `insert into intake_attachment_upload_claims
+          (organization_id, publication_id, attachment_id, fingerprint, expires_at)
+          values ($1, $3, uuidv7(), 'receipt-cleanup-test', now() - interval '1 hour'),
+                 ($2, $3, uuidv7(), 'receipt-cleanup-test', now() - interval '2 hours'),
+                 ($2, $3, uuidv7(), 'receipt-cleanup-test', now() + interval '1 hour')`,
+        [atelierNordId, otherOrganizationId, publicationId],
+      );
+
+      await expect(purge.deleteBatch(2)).resolves.toBe(2);
+      await expect(purge.deleteBatch(2)).resolves.toBe(1);
+      await expect(purge.deleteBatch(2)).resolves.toBe(0);
+      const remaining = await tx.client.query(
+        `delete from intake_attachment_upload_claims
+          where publication_id = $1 and fingerprint = 'receipt-cleanup-test'
+          returning organization_id`,
+        [publicationId],
+      );
+      expect(remaining.rows).toEqual([{ organization_id: otherOrganizationId }]);
+    });
+  });
+
+  it('persists the exact signed cutoff with its encrypted intake receipt and replays it', async () => {
+    const tenant: TenantTransactionRunner = service().get(TenantTransactionRunner);
+    const identity = {
+      organizationId: atelierNordId,
+      publicationId: '019a7001-2b3c-7d4e-8f5a-6b7c8d9e0f13',
+      attachmentId: '019a7004-3b2c-7d4e-8f5a-6b7c8d9e0f83',
+    };
+    const reservedAt = new Date();
+    const stagingObjectKey = 'intake/019a7006-7a8b-7c9d-8e0f-1a2b3c4d5d82';
+    const signedExpiry = new Date(reservedAt.getTime() + 4 * 60_000);
+    const allocation = IntakeAttachment.reserve({
+      ...identity,
+      id: identity.attachmentId,
+      stagingObjectKey,
+      fileName: 'sprint-14.png',
+      contentType: 'image/png',
+      sizeBytes: 42,
+      reservedAt,
+      expiresAt: new Date(reservedAt.getTime() + 30 * 60_000),
+    });
+    const capability = {
+      id: identity.attachmentId,
+      method: 'POST',
+      url: 'https://files.example.test/intake',
+      fields: { key: stagingObjectKey },
+      expiresAt: signedExpiry.toISOString(),
+    } as const;
+    const receipts = new UploadReceiptCodec({
+      activeKeyId: 'intake-test',
+      keys: [{ id: 'intake-test', key: randomBytes(32).toString('base64url') }],
+    });
+
+    await runWithOrganizationContext(
+      {
+        organizationId: atelierNordId,
+        actor: { type: 'system', id: null },
+        role: null,
+        scopes: [],
+      },
+      () =>
+        tenant.run(async (scope) => {
+          const store = new DrizzleIntakeAttachmentTransaction(
+            scope,
+            atelierNordId,
+            () => Promise.reject(new Error('Unexpected verification event.')),
+            () => Promise.reject(new Error('Unexpected file event.')),
+            receipts,
+          );
+          expect(await store.lock(identity)).toBeNull();
+          const lease = await store.beginSigning(allocation);
+          if (lease.kind !== 'acquired') throw new Error('Expected the original signing lease.');
+          await expect(store.completeSigning(identity, lease.claimId, capability)).resolves.toEqual(
+            { kind: 'completed' },
+          );
+          const stored = await store.lock(identity);
+          expect(stored?.snapshot.reservation?.uploadExpiresAt).toEqual(signedExpiry);
+          await expect(store.beginSigning(allocation)).resolves.toEqual({
+            kind: 'replay',
+            capability,
+          });
+
+          const keys = [identity.organizationId, identity.publicationId, identity.attachmentId];
+          await scope.client.query(
+            'delete from intake_attachment_upload_claims where organization_id = $1 and publication_id = $2 and attachment_id = $3',
+            keys,
+          );
+          await scope.client.query(
+            'delete from intake_attachment_candidates where organization_id = $1 and publication_id = $2 and attachment_id = $3',
+            keys,
+          );
+          await scope.client.query(
+            'delete from intake_attachments where organization_id = $1 and publication_id = $2 and id = $3',
+            keys,
+          );
+        }),
     );
   });
 
@@ -1591,7 +1723,7 @@ describe('storage-service wiring', () => {
     const journal = await migrator.query<{ applied: number }>(
       'select count(*)::int as applied from drizzle.__drizzle_migrations',
     );
-    expect(journal.rows).toEqual([{ applied: 2 }]);
+    expect(journal.rows).toEqual([{ applied: 3 }]);
   });
 
   it('runs the outbox relay and marks an acknowledged event as sent', async () => {
@@ -1634,6 +1766,25 @@ describe('storage-service wiring', () => {
       brokerAccepts(storage, '--inbox-prefix', '_INBOX.storage', 'stream', 'info', 'EVENTS'),
     ).toBe(true);
     expect(brokerAccepts(storage, 'stream', 'info', 'EVENTS')).toBe(false);
+    for (const handler of ['claim-intake-attachment', 'release-intake-attachment']) {
+      expect(
+        brokerAccepts(
+          storage,
+          '--inbox-prefix',
+          '_INBOX.storage',
+          'consumer',
+          'info',
+          'EVENTS',
+          `storage-service__${handler}`,
+        ),
+      ).toBe(true);
+    }
+    expect(brokerAccepts(storage, 'pub', 'evt.intake.attachment-claimed.v1', 'refused')).toBe(
+      false,
+    );
+    expect(brokerAccepts(storage, 'pub', 'evt.intake.attachment-released.v1', 'refused')).toBe(
+      false,
+    );
     expect(brokerAccepts(storage, 'pub', 'evt.task.wiring-probe', 'refused')).toBe(false);
     expect(brokerAccepts({ NATS_USER: '', NATS_PASSWORD: '' }, 'pub', 'evt.file.x', 'x')).toBe(
       false,

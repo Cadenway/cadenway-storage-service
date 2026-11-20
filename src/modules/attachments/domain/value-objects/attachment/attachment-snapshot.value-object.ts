@@ -1,8 +1,11 @@
 import type { AttachmentReservation } from './attachment-reservation.value-object.js';
 
 /** Persisted lifecycle state. Only an attachment that reached ready has an uploadedAt. */
-export interface AttachmentSnapshot extends AttachmentReservation {
+export interface AttachmentSnapshot extends Omit<AttachmentReservation, 'authorUserId'> {
   // #region Properties
+  /** Verified author for authenticated uploads, or null for a claimed anonymous intake. */
+  readonly authorUserId: string | null;
+
   /** Lifecycle status, including a tombstone for discarded reservations. */
   readonly status: 'pending' | 'ready' | 'deleted';
 

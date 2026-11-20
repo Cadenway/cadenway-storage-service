@@ -20,7 +20,7 @@ export const attachments = pgTable(
       .notNull()
       .default(sql`uuidv7()`),
     taskKey: text('task_key').notNull(),
-    authorUserId: uuid('author_user_id').notNull(),
+    authorUserId: uuid('author_user_id'),
     objectKey: text('object_key').notNull(),
     stagingObjectKey: text('staging_object_key').notNull(),
     fileName: text('file_name').notNull(),

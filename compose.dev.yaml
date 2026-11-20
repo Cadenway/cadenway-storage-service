@@ -127,12 +127,21 @@ configs:
               publish: {
                 allow: [
                   "evt.file.>",
+                  "evt.intake.attachment-verified.v1",
                   "rebuild.*.file",
                   "$$JS.API.INFO", "$$JS.API.STREAM.NAMES", "$$JS.API.STREAM.INFO.EVENTS",
                   "$$JS.API.CONSUMER.CREATE.EVENTS.storage-service__record-task-purge.evt.task.purged.v1",
                   "$$JS.API.CONSUMER.INFO.EVENTS.storage-service__record-task-purge",
                   "$$JS.API.CONSUMER.MSG.NEXT.EVENTS.storage-service__record-task-purge",
-                  "$$JS.ACK.EVENTS.storage-service__record-task-purge.>"
+                  "$$JS.ACK.EVENTS.storage-service__record-task-purge.>",
+                  "$$JS.API.CONSUMER.CREATE.EVENTS.storage-service__claim-intake-attachment.evt.intake.attachment-claimed.v1",
+                  "$$JS.API.CONSUMER.INFO.EVENTS.storage-service__claim-intake-attachment",
+                  "$$JS.API.CONSUMER.MSG.NEXT.EVENTS.storage-service__claim-intake-attachment",
+                  "$$JS.ACK.EVENTS.storage-service__claim-intake-attachment.>",
+                  "$$JS.API.CONSUMER.CREATE.EVENTS.storage-service__release-intake-attachment.evt.intake.attachment-released.v1",
+                  "$$JS.API.CONSUMER.INFO.EVENTS.storage-service__release-intake-attachment",
+                  "$$JS.API.CONSUMER.MSG.NEXT.EVENTS.storage-service__release-intake-attachment",
+                  "$$JS.ACK.EVENTS.storage-service__release-intake-attachment.>"
                 ]
               }
               subscribe: { allow: ["_INBOX.storage.>", "rebuild.storage.>"] }

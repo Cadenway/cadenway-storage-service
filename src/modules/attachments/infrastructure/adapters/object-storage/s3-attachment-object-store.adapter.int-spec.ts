@@ -265,6 +265,42 @@ describe('Garage-backed attachment transfers', () => {
     expect(page.next).toBeNull();
   });
 
+  it('signs, verifies and erases an opaque intake upload while retaining its elected bytes', async () => {
+    if (store === undefined) throw new Error('Garage was not initialized');
+    const stagingKey = 'intake/019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b11';
+    const candidateKey = `org/${ORGANIZATION}/019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b12`;
+    const expiresAt = new Date(Date.now() + 180_000);
+    const capability = await store.signIntakeUpload({
+      organizationId: ORGANIZATION,
+      attachmentId: ATTACHMENT,
+      stagingKey,
+      contentType: 'image/png',
+      expiresAt,
+    });
+    expect(capability.fields.key).toBe(stagingKey);
+    expect(new Date(capability.expiresAt).getTime()).toBeLessThanOrEqual(expiresAt.getTime());
+    const response = await upload(capability, PNG);
+    expect(response.status).toBe(204);
+    expect(response.headers.get('access-control-allow-origin')).toBe(ORIGIN);
+    await expect(
+      store.copyAndVerifyIntake({ organizationId: ORGANIZATION, stagingKey, candidateKey }),
+    ).resolves.toEqual({
+      sizeBytes: PNG.length,
+      contentType: 'image/png',
+      verifiedContentType: 'image/png',
+    });
+
+    const signal = new AbortController().signal;
+    const page = await store.listIntakeObjects(null, signal);
+    expect(page.objects).toEqual([{ objectKey: stagingKey }]);
+    await store.deleteIntakeObject({ organizationId: ORGANIZATION, objectKey: stagingKey });
+    expect((await store.listIntakeObjects(null, signal)).objects).toEqual([]);
+    const signed = await store.signDownload({ objectKey: candidateKey, fileName: 'sprint-14.png' });
+    const download = await fetch(signed.url);
+    expect(download.status).toBe(200);
+    expect(new Uint8Array(await download.arrayBuffer())).toEqual(PNG);
+  });
+
   it('accepts a file of 25 MiB and refuses one additional byte', async () => {
     if (store === undefined) throw new Error('Garage was not initialized');
     const capability = await store.signUpload({

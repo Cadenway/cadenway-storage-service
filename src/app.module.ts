@@ -34,8 +34,8 @@ import { PlatformModule } from './modules/platform/platform.module.js';
  * - `MessagingModule`: the NATS connection of the `storage` user, with the inbox prefix
  *   `_INBOX.storage` the broker requires. The creation waits for the first connection, then checks
  *   that the `EVENTS` stream exists: cadenway-ops creates the streams (`manageStreams: false`), and
- *   only notification-service runs the dead-letter worker. The service publishes and consumes
- *   nothing yet, since `@cadenway/contracts` defines no event of its own.
+ *   only notification-service runs the dead-letter worker. The attachments module publishes
+ *   lifecycle and verification facts and consumes Task purge and intake decisions.
  * - `OutboxModule`: the outbox writer, the PostgreSQL deduplicator and the relay, which polls
  *   `outbox_events` every second in a system transaction and publishes the pending rows. It runs in
  *   every replica; `for update skip locked` keeps two of them from publishing the same row.

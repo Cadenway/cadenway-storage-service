@@ -9,4 +9,4 @@ import { startTelemetry } from '@cadenway/nest-common/telemetry';
 // process.
 // The exporter also replaces this literal wherever it appears in a recorded URL, including
 // requests whose path includes a bucket or an endpoint prefix before the object key.
-startTelemetry({ service: 'storage-service', sensitiveHttpPathPrefixes: ['/org/'] });
+startTelemetry({ service: 'storage-service', sensitiveHttpPathPrefixes: ['/org/', '/intake/'] });

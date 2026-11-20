@@ -24,7 +24,7 @@ export class SweepAttachmentCleanupHandler implements OnApplicationBootstrap {
   public constructor(
     private readonly workers: JobWorkerRegistry,
     private readonly scheduler: JobScheduler,
-    private readonly sweep: SweepAttachmentCleanup,
+    private readonly sweep: Pick<SweepAttachmentCleanup, 'execute'>,
     private readonly queue: string,
   ) {}
   // #endregion

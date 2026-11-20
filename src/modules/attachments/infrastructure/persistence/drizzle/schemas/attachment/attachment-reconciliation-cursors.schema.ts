@@ -14,7 +14,7 @@ export const attachmentReconciliationCursors = pgTable(
     leasedUntil: timestamp('leased_until', { withTimezone: true, precision: 3 }),
   },
   (table) => [
-    check('attachment_reconciliation_scope_check', sql`${table.scope} = 'objects'`),
+    check('attachment_reconciliation_scope_check', sql`${table.scope} in ('objects', 'intake')`),
     check(
       'attachment_reconciliation_lease_check',
       sql`(${table.leaseId} is null) = (${table.leasedUntil} is null)`,
