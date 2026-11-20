@@ -19,7 +19,7 @@ import { SystemTransactionRunner, TenantTransactionRunner } from '@cadenway/nest
 import { Controller, Get, Injectable, Module } from '@nestjs/common';
 import type { BeforeApplicationShutdown } from '@nestjs/common';
 import type { NestExpressApplication } from '@nestjs/platform-express';
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import pg from 'pg';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -51,6 +51,9 @@ import { DrizzleAttachmentReconciliation } from '../src/modules/attachments/infr
 import { DrizzleAttachmentTransaction } from '../src/modules/attachments/infrastructure/persistence/drizzle/repositories/attachment/drizzle-attachment-transaction.repository.js';
 import { DrizzleExpiredUploadReceipts } from '../src/modules/attachments/infrastructure/persistence/drizzle/repositories/attachment/drizzle-expired-upload-receipts.repository.js';
 import { DrizzleIntakeAttachmentTransaction } from '../src/modules/attachments/infrastructure/persistence/drizzle/repositories/attachment/drizzle-intake-attachment-transaction.repository.js';
+import { DrizzleAttachmentSearchProjectionReader } from '../src/modules/attachments/infrastructure/persistence/drizzle/repositories/search-projection/drizzle-attachment-search-projection-reader.repository.js';
+import { attachmentTaskTombstones } from '../src/modules/attachments/infrastructure/persistence/drizzle/schemas/attachment/attachment-task-tombstones.schema.js';
+import { attachments } from '../src/modules/attachments/infrastructure/persistence/drizzle/schemas/attachment/attachments.schema.js';
 import { DrizzleAttachmentCleanupUnitOfWork } from '../src/modules/attachments/infrastructure/persistence/drizzle/transactions/attachment/drizzle-attachment-cleanup.unit-of-work.js';
 import { AbandonProfileMedia } from '../src/modules/profile-media/application/use-cases/commands/media/abandon-profile-media/abandon-profile-media.use-case.js';
 import { ApplyProfileMediaChange } from '../src/modules/profile-media/application/use-cases/commands/media/apply-profile-media-change/apply-profile-media-change.use-case.js';
@@ -2372,6 +2375,165 @@ describe('storage-service wiring', () => {
       expect(await peer.acquire()).toMatchObject({ continuation: null });
     } finally {
       await removeFixtures();
+    }
+  });
+
+  it('exports and resolves attachment Search projections with a tenant-scoped high-water mark', async () => {
+    const tenant: TenantTransactionRunner = service().get(TenantTransactionRunner);
+    const reader: DrizzleAttachmentSearchProjectionReader = service().get(
+      DrizzleAttachmentSearchProjectionReader,
+    );
+    const organizationId = '019a7004-3b2c-7d4e-8f5a-6b7c8d9e1001';
+    const foreignOrganizationId = '019a7004-3b2c-7d4e-8f5a-6b7c8d9e1002';
+    const first = '019a7004-3b2c-7d4e-8f5a-6b7c8d9e1011';
+    const revoked = '019a7004-3b2c-7d4e-8f5a-6b7c8d9e1012';
+    const upper = '019a7004-3b2c-7d4e-8f5a-6b7c8d9e1013';
+    const pending = '019a7004-3b2c-7d4e-8f5a-6b7c8d9e1014';
+    const deleted = '019a7004-3b2c-7d4e-8f5a-6b7c8d9e1015';
+    const discarded = '019a7004-3b2c-7d4e-8f5a-6b7c8d9e1016';
+    const unknown = '019a7004-3b2c-7d4e-8f5a-6b7c8d9e1017';
+    const added = '019a7004-3b2c-7d4e-8f5a-6b7c8d9e1018';
+    const foreign = '019a7004-3b2c-7d4e-8f5a-6b7c8d9e1019';
+    const timestamp = new Date('2026-11-20T08:00:00.000Z');
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1_000);
+    const asSearch = <T>(id: string, work: () => Promise<T>): Promise<T> =>
+      runWithOrganizationContext(
+        {
+          organizationId: id,
+          actor: { type: 'system', id: 'search-service' },
+          role: null,
+          scopes: [],
+        },
+        work,
+      );
+    const file = (
+      id: string,
+      taskKey: string,
+      status: 'ready' | 'pending' | 'deleted',
+      wasReady: boolean,
+      owner = organizationId,
+    ): typeof attachments.$inferInsert => ({
+      organizationId: owner,
+      id,
+      taskKey,
+      fileName: 'fixture.pdf',
+      objectKey: `org/${owner}/${id}`,
+      stagingObjectKey: `org/${owner}/stage-${id}`,
+      contentType: 'application/pdf',
+      sizeBytes: 128,
+      status,
+      version: Number(wasReady) + Number(status === 'deleted'),
+      reservedAt: timestamp,
+      expiresAt,
+      uploadedAt: wasReady ? timestamp : null,
+      deletedAt: status === 'deleted' ? timestamp : null,
+      electedObjectKey: wasReady ? `org/${owner}/winner-${id}` : null,
+    });
+    const purgeTask = (owner: string, taskKey: string): Promise<unknown> =>
+      asSearch(owner, () =>
+        tenant.run(({ db }) =>
+          db.insert(attachmentTaskTombstones).values({
+            organizationId: owner,
+            taskKey,
+            purgedAt: timestamp,
+            purgeActorType: 'system',
+            purgeActorId: 'task-service',
+            cleanupPending: true,
+          }),
+        ),
+      );
+    const project = (fileId: string, taskKey: string) => ({
+      fileId,
+      taskKey,
+      fileName: 'fixture.pdf',
+      version: 1,
+    });
+
+    try {
+      await asSearch(organizationId, () =>
+        tenant.run(({ db }) =>
+          db
+            .insert(attachments)
+            .values([
+              file(upper, 'CAD-703', 'ready', true),
+              file(revoked, 'CAD-702', 'ready', true),
+              file(first, 'CAD-701', 'ready', true),
+              file(pending, 'CAD-705', 'pending', false),
+              file(deleted, 'CAD-706', 'deleted', true),
+              file(discarded, 'CAD-707', 'deleted', false),
+            ]),
+        ),
+      );
+      await asSearch(foreignOrganizationId, () =>
+        tenant.run(({ db }) =>
+          db
+            .insert(attachments)
+            .values(file(foreign, 'CAD-709', 'ready', true, foreignOrganizationId)),
+        ),
+      );
+      await purgeTask(foreignOrganizationId, 'CAD-703');
+
+      const page = await asSearch(organizationId, () =>
+        reader.list({ organizationId, position: null, limit: 1 }),
+      );
+      expect(page).toEqual({
+        items: [project(first, 'CAD-701')],
+        nextPosition: { upperFileId: upper, afterFileId: first },
+      });
+
+      await purgeTask(organizationId, 'CAD-702');
+      await asSearch(organizationId, () =>
+        tenant.run(({ db }) =>
+          db.insert(attachments).values(file(added, 'CAD-708', 'ready', true)),
+        ),
+      );
+
+      await expect(
+        asSearch(organizationId, () =>
+          reader.list({ organizationId, position: page.nextPosition, limit: 1 }),
+        ),
+      ).resolves.toEqual({ items: [project(upper, 'CAD-703')], nextPosition: null });
+      await expect(
+        asSearch(organizationId, () => reader.list({ organizationId, position: null, limit: 100 })),
+      ).resolves.toEqual({
+        items: [project(first, 'CAD-701'), project(upper, 'CAD-703'), project(added, 'CAD-708')],
+        nextPosition: null,
+      });
+      await expect(
+        asSearch(organizationId, () =>
+          reader.resolve(organizationId, [
+            deleted,
+            foreign,
+            upper,
+            revoked,
+            pending,
+            discarded,
+            unknown,
+          ]),
+        ),
+      ).resolves.toEqual([
+        { status: 'absent', fileId: deleted, version: 2 },
+        { status: 'absent', fileId: foreign, version: null },
+        { status: 'present', projection: project(upper, 'CAD-703') },
+        { status: 'absent', fileId: revoked, version: null },
+        { status: 'absent', fileId: pending, version: null },
+        { status: 'absent', fileId: discarded, version: 1 },
+        { status: 'absent', fileId: unknown, version: null },
+      ]);
+      await expect(
+        asSearch(foreignOrganizationId, () => reader.resolve(organizationId, [first])),
+      ).rejects.toThrow('Attachment Search tenant mismatch.');
+    } finally {
+      for (const id of [organizationId, foreignOrganizationId]) {
+        await asSearch(id, () =>
+          tenant.run(async ({ db }) => {
+            await db.delete(attachments).where(eq(attachments.organizationId, id));
+            await db
+              .delete(attachmentTaskTombstones)
+              .where(eq(attachmentTaskTombstones.organizationId, id));
+          }),
+        );
+      }
     }
   });
 

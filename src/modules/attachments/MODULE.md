@@ -30,6 +30,13 @@ system-only policy.
 
 ## API
 
+The signed Search system identity can page `GET /internal/v1/attachment-search-projections`
+and resolve an ordered batch with `POST /internal/v1/attachment-search-projections/resolve`.
+Both use the signed organization and return private, uncacheable metadata. An authenticated
+cursor fixes the upper UUID bound for the export. The projection includes ready attachments
+whose task Storage has not fenced for permanent purge. Task owns the current visibility
+decision. Resolution returns the retained terminal version of a deleted attachment.
+
 The P4 routes are defined in `openapi/internal/storage-service.yaml`.
 
 | Route                                                                     | Purpose                              |
@@ -112,6 +119,10 @@ system actor on its `file.uploaded.v1` fact. A release suppresses a later start 
   after the draft expires.
 
 ## Transactions
+
+Search exports read the upper bound and page in an organization-scoped `REPEATABLE READ READ
+ONLY` snapshot. Search resolution reads the attachment rows and their task purge fences in one
+organization-scoped query.
 
 Each lifecycle write owns its organization transaction. Finalization, deletion or purge cleanup
 commits the metadata change, the outbox fact when applicable and any pending cleanup work together.
