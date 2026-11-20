@@ -54,10 +54,13 @@ import { DrizzleIntakeAttachmentTransaction } from '../src/modules/attachments/i
 import { DrizzleAttachmentCleanupUnitOfWork } from '../src/modules/attachments/infrastructure/persistence/drizzle/transactions/attachment/drizzle-attachment-cleanup.unit-of-work.js';
 import { AbandonProfileMedia } from '../src/modules/profile-media/application/use-cases/commands/media/abandon-profile-media/abandon-profile-media.use-case.js';
 import { ApplyProfileMediaChange } from '../src/modules/profile-media/application/use-cases/commands/media/apply-profile-media-change/apply-profile-media-change.use-case.js';
+import { ProfileMediaUpload } from '../src/modules/profile-media/domain/aggregates/media/profile-media-upload.aggregate.js';
+import { AesProfileMediaReceiptCipher } from '../src/modules/profile-media/infrastructure/adapters/crypto/aes-profile-media-receipt-cipher.adapter.js';
 import {
   deleteExpiredProfileMediaReceipts,
   DrizzleProfileMediaCleanupTransaction,
 } from '../src/modules/profile-media/infrastructure/persistence/drizzle/repositories/media/drizzle-profile-media-cleanup-transaction.repository.js';
+import { DrizzleProfileMediaTransaction } from '../src/modules/profile-media/infrastructure/persistence/drizzle/repositories/media/drizzle-profile-media-transaction.repository.js';
 
 // The service as main.ts assembles it, on a disposable PostgreSQL and NATS.
 // `@cadenway/nest-testing` does not export its container fixtures yet and a service never depends
@@ -1958,6 +1961,61 @@ describe('storage-service wiring', () => {
     expect(response.status).toBe(404);
     expect(response.body).toMatchObject({ code: 'media.not-found' });
     expect(response.headers['cache-control']).toBe('no-store');
+  });
+
+  it('seals and reads the original media receipt using the PostgreSQL retention clock', async () => {
+    const owner = { kind: 'avatar', id: randomUUID() } as const;
+    const uploadId = '019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b98';
+    const now = new Date();
+    const expiresAt = new Date(Math.floor(now.getTime() / 1_000) * 1_000 + 60_000);
+    const upload = ProfileMediaUpload.reserve(
+      {
+        owner,
+        uploadId,
+        uploaderUserId: owner.id,
+        contentType: 'image/png',
+        sizeBytes: 24,
+        expiresAt,
+      },
+      now,
+    );
+    const capability = {
+      uploadId,
+      url: 'https://files.example.test/fixture',
+      method: 'POST' as const,
+      fields: { key: 'profile-media/staging/fixture' },
+      expiresAt: expiresAt.toISOString(),
+    };
+    const cipher = new AesProfileMediaReceiptCipher('fixture', [
+      { id: 'fixture', key: randomBytes(32).toString('base64url') },
+    ]);
+    const runner: SystemTransactionRunner = service().get(SystemTransactionRunner);
+    await runner.run(async (scope) => {
+      const uploads = new DrizzleProfileMediaTransaction(scope, owner, cipher);
+      await uploads.lockOwner(owner);
+      await uploads.insertUpload(upload);
+      const lease = await uploads.claimSigning(owner, uploadId);
+      if (lease === null) throw new Error('Media test lease unavailable.');
+      expect(await uploads.completeSigning(owner, uploadId, lease, capability)).toBe(true);
+    });
+    await runner.run(async (scope) => {
+      const uploads = new DrizzleProfileMediaTransaction(scope, owner, cipher);
+      await uploads.lockOwner(owner);
+      expect(await uploads.findCapability(owner, uploadId)).toEqual(capability);
+      const receipt = await scope.client.query(
+        `select receipt_expires_at between statement_timestamp() + interval '23 hours'
+          and statement_timestamp() + interval '25 hours' as retained
+          from profile_media_receipts where owner_id = $1 and upload_id = $2`,
+        [owner.id, uploadId],
+      );
+      expect(receipt.rows).toEqual([{ retained: true }]);
+      await scope.client.query('delete from profile_media_receipts where owner_id = $1', [
+        owner.id,
+      ]);
+      await scope.client.query('delete from profile_media_objects where owner_id = $1', [owner.id]);
+      await scope.client.query('delete from profile_media_uploads where owner_id = $1', [owner.id]);
+      await scope.client.query('delete from profile_media_owners where owner_id = $1', [owner.id]);
+    });
   });
 
   it('refuses a token signed for another service', async () => {

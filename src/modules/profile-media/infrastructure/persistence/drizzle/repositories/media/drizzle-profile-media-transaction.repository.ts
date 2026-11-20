@@ -250,15 +250,20 @@ export class DrizzleProfileMediaTransaction implements ProfileMediaTransaction {
     )
       return false;
     const [time] = await this.scope.db
-      .execute<{ expires: Date }>(
-        sql`select date_trunc('milliseconds', clock_timestamp() + interval '24 hours') as expires`,
+      .execute<{ expires: string }>(
+        sql`select floor(extract(epoch from (clock_timestamp() + interval '24 hours')) * 1000)::text as expires`,
       )
       .then((result) => result.rows);
     if (time === undefined) throw new Error('Receipt retention unavailable.');
-    const sealed = this.cipher.seal(capability, this.binding(upload, time.expires));
+    const expiresAtMs = Number(time.expires);
+    if (!Number.isSafeInteger(expiresAtMs) || expiresAtMs <= 0) {
+      throw new Error('Receipt retention unavailable.');
+    }
+    const receiptExpiresAt = new Date(expiresAtMs);
+    const sealed = this.cipher.seal(capability, this.binding(upload, receiptExpiresAt));
     const rows = await this.scope.db
       .update(profileMediaReceipts)
-      .set({ ...sealed, receiptExpiresAt: time.expires, leaseId: null, leasedUntil: null })
+      .set({ ...sealed, receiptExpiresAt, leaseId: null, leasedUntil: null })
       .where(
         and(
           this.where(profileMediaReceipts),
