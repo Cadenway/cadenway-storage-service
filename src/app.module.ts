@@ -15,6 +15,7 @@ import type { AppConfig } from './config/app-config.js';
 import { jobQueues } from './config/job-queues.js';
 import { AttachmentsModule } from './modules/attachments/attachments.module.js';
 import { PlatformModule } from './modules/platform/platform.module.js';
+import { ProfileMediaModule } from './modules/profile-media/profile-media.module.js';
 
 /**
  * Class AppModule
@@ -34,8 +35,9 @@ import { PlatformModule } from './modules/platform/platform.module.js';
  * - `MessagingModule`: the NATS connection of the `storage` user, with the inbox prefix
  *   `_INBOX.storage` the broker requires. The creation waits for the first connection, then checks
  *   that the `EVENTS` stream exists: cadenway-ops creates the streams (`manageStreams: false`), and
- *   only notification-service runs the dead-letter worker. The attachments module publishes
- *   lifecycle and verification facts and consumes Task purge and intake decisions.
+ *   only notification-service runs the dead-letter worker. Storage publishes attachment lifecycle
+ *   and verification facts. Attachments consumes Task purge and intake decisions. Profile Media
+ *   consumes authoritative Identity and Organization media decisions.
  * - `OutboxModule`: the outbox writer, the PostgreSQL deduplicator and the relay, which polls
  *   `outbox_events` every second in a system transaction and publishes the pending rows. It runs in
  *   every replica; `for update skip locked` keeps two of them from publishing the same row.
@@ -97,6 +99,7 @@ import { PlatformModule } from './modules/platform/platform.module.js';
     }),
     PlatformModule,
     AttachmentsModule,
+    ProfileMediaModule,
   ],
 })
 export class AppModule {}

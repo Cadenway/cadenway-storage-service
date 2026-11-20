@@ -5,6 +5,10 @@ import { AppModule } from './app.module.js';
 import { appConfigSchema } from './config/app-config.js';
 import type { AppConfig } from './config/app-config.js';
 import { noStoreIntakeAttachmentParserErrors } from './infrastructure/http/no-store-intake-attachments.middleware.js';
+import {
+  noStoreProfileMediaErrors,
+  profileMediaPaths,
+} from './infrastructure/http/no-store-profile-media.middleware.js';
 
 // Started after the instrumentation hooks and `telemetry.js`, with the heap capped for the 256M
 // container: `node --max-old-space-size=160 --import @cadenway/nest-common/register
@@ -28,5 +32,6 @@ await runApplication({ service: 'storage-service' }, async (): Promise<void> => 
     },
   });
   app.use('/internal/v1/intake-publications', noStoreIntakeAttachmentParserErrors);
+  app.use(profileMediaPaths, noStoreProfileMediaErrors);
   await app.listen(config.PORT);
 });
