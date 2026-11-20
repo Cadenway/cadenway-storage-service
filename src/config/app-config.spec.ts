@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { parseEnv } from 'node:util';
 
 import { ConfigError, loadConfig } from '@cadenway/nest-common';
@@ -17,6 +18,25 @@ describe('appConfigSchema', () => {
     NATS_PASSWORD: 'storage',
     INTERNAL_TOKEN_AUDIENCE: 'storage-service',
     INTERNAL_TOKEN_TRUSTED_ISSUERS: trustedIssuers,
+  };
+  const objectStorage: Readonly<Record<string, string>> = {
+    S3_ENDPOINT: 'http://garage:3900',
+    S3_PUBLIC_ENDPOINT: 'https://files.example.test',
+    S3_REGION: 'garage',
+    S3_BUCKET: 'storage-test',
+    S3_ACCESS_KEY_ID: 'fixture-key',
+    S3_SECRET_ACCESS_KEY: 'fixture-placeholder',
+  };
+  const receiptKeys = {
+    activeKeyId: 'current',
+    keys: [
+      { id: 'current', key: randomBytes(32).toString('base64url') },
+      { id: 'previous', key: randomBytes(32).toString('base64url') },
+    ],
+  };
+  const configuredStorage = {
+    ...objectStorage,
+    STORAGE_UPLOAD_RECEIPT_KEYS: JSON.stringify(receiptKeys),
   };
 
   it('reads the variables of the service with the defaults of the kit', () => {
@@ -51,6 +71,68 @@ describe('appConfigSchema', () => {
 
     expect(() => loadConfig(appConfigSchema, example)).not.toThrow();
     expect(() => loadConfig(migrationConfigSchema, example)).not.toThrow();
+  });
+
+  it('validates both object storage endpoints and keeps path-style addressing opt-in', () => {
+    const config = loadConfig(appConfigSchema, { ...complete, ...configuredStorage });
+    expect(config.objectStorage).toMatchObject({
+      endpoint: 'http://garage:3900',
+      publicEndpoint: 'https://files.example.test',
+      bucket: 'storage-test',
+      forcePathStyle: false,
+      receiptKeys,
+    });
+    expect(
+      loadConfig(appConfigSchema, {
+        ...complete,
+        ...configuredStorage,
+        S3_FORCE_PATH_STYLE: 'true',
+      }).objectStorage?.forcePathStyle,
+    ).toBe(true);
+  });
+
+  it('requires an encryption keyring before enabling object storage', () => {
+    expect(() => loadConfig(appConfigSchema, { ...complete, ...objectStorage })).toThrow(
+      /STORAGE_UPLOAD_RECEIPT_KEYS: required, not set/u,
+    );
+  });
+
+  it('rejects an unknown active key and duplicate key IDs without disclosing values', () => {
+    for (const invalid of [
+      { ...receiptKeys, activeKeyId: 'missing' },
+      { ...receiptKeys, keys: [receiptKeys.keys[0], receiptKeys.keys[0]] },
+      { activeKeyId: 'current', keys: [{ id: 'current', key: 'invalid-private-value' }] },
+    ]) {
+      const environment = {
+        ...complete,
+        ...objectStorage,
+        STORAGE_UPLOAD_RECEIPT_KEYS: JSON.stringify(invalid),
+      };
+      expect(() => loadConfig(appConfigSchema, environment)).toThrow(
+        /STORAGE_UPLOAD_RECEIPT_KEYS/u,
+      );
+      expect(() => loadConfig(appConfigSchema, environment)).not.toThrow(/invalid-private-value/u);
+    }
+  });
+
+  it('refuses partially configured storage without including credential values', () => {
+    const environment = { ...complete, S3_ACCESS_KEY_ID: 'fixture-sensitive-value' };
+
+    expect(() => loadConfig(appConfigSchema, environment)).toThrow(
+      /S3_SECRET_ACCESS_KEY: required, not set/u,
+    );
+    expect(() => loadConfig(appConfigSchema, environment)).not.toThrow(/fixture-sensitive-value/u);
+  });
+
+  it('refuses an object storage URI with embedded credentials without including them', () => {
+    const environment = {
+      ...complete,
+      ...configuredStorage,
+      S3_PUBLIC_ENDPOINT: 'https://storage:fixture-sensitive-value@files.example.test',
+    };
+
+    expect(() => loadConfig(appConfigSchema, environment)).toThrow(/S3_PUBLIC_ENDPOINT:/u);
+    expect(() => loadConfig(appConfigSchema, environment)).not.toThrow(/fixture-sensitive-value/u);
   });
 
   it('refuses to start without the database, the broker, the audience or the trusted issuers', () => {

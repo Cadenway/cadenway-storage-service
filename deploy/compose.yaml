@@ -12,7 +12,8 @@
 #
 # The S3_* variables are the object storage of the attachments, each from STORAGE_S3_* in
 # cadenway-ops. S3_ENDPOINT is where the service reaches it; S3_PUBLIC_ENDPOINT is the host the
-# browser follows in a signed URL. Nothing reads them until the first module stores a file.
+# browser follows in a signed URL. STORAGE_UPLOAD_RECEIPT_KEYS is the separate versioned keyring
+# used to encrypt upload receipts. Provision it in cadenway-ops before enabling object storage.
 #
 # MIGRATION_DATABASE_URL is deliberately absent: the GitOps agent of cadenway-ops hands the
 # migrator's URL to the one-off migration container only (docs/database.md there), so the running
@@ -37,6 +38,7 @@ services:
       S3_ACCESS_KEY_ID: ${STORAGE_S3_ACCESS_KEY_ID}
       S3_SECRET_ACCESS_KEY: ${STORAGE_S3_SECRET_ACCESS_KEY}
       S3_FORCE_PATH_STYLE: ${STORAGE_S3_FORCE_PATH_STYLE}
+      STORAGE_UPLOAD_RECEIPT_KEYS: ${STORAGE_UPLOAD_RECEIPT_KEYS}
     networks:
       - internal
     healthcheck:
