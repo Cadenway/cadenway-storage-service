@@ -1,5 +1,5 @@
 {
-  "id": "4e81032d-7423-498a-91e3-bd43fcb80a89",
+  "id": "2134dd22-afe9-4db0-b36c-1851daa9f773",
   "prevId": "002074a5-b1ad-40e5-a059-66ff0a9efd37",
   "version": "7",
   "dialect": "postgresql",
@@ -1141,7 +1141,7 @@
         },
         "intake_attachments_lifecycle_check": {
           "name": "intake_attachments_lifecycle_check",
-          "value": "(\n        (\"intake_attachments\".\"status\" = 'pending' and \"intake_attachments\".\"staging_object_key\" is not null and \"intake_attachments\".\"candidate_key\" is null and \"intake_attachments\".\"verified_at\" is null and \"intake_attachments\".\"task_key\" is null and \"intake_attachments\".\"decided_at\" is null)\n        or (\"intake_attachments\".\"status\" = 'verified' and \"intake_attachments\".\"staging_object_key\" is not null and \"intake_attachments\".\"candidate_key\" is not null and \"intake_attachments\".\"verified_at\" is not null and \"intake_attachments\".\"task_key\" is null and \"intake_attachments\".\"decided_at\" is null)\n        or (\"intake_attachments\".\"status\" = 'claimed' and \"intake_attachments\".\"task_key\" is not null and \"intake_attachments\".\"decided_at\" is not null)\n        or (\"intake_attachments\".\"status\" = 'released' and \"intake_attachments\".\"task_key\" is null and \"intake_attachments\".\"decided_at\" is not null)\n      )"
+          "value": "(\n        (\"intake_attachments\".\"status\" = 'pending' and \"intake_attachments\".\"staging_object_key\" is not null and \"intake_attachments\".\"candidate_key\" is null and \"intake_attachments\".\"verified_at\" is null and \"intake_attachments\".\"task_key\" is null and \"intake_attachments\".\"decided_at\" is null)\n        or (\"intake_attachments\".\"status\" = 'verified' and \"intake_attachments\".\"staging_object_key\" is not null and \"intake_attachments\".\"candidate_key\" is not null and \"intake_attachments\".\"verified_at\" is not null and \"intake_attachments\".\"task_key\" is null and \"intake_attachments\".\"decided_at\" is null)\n        or (\"intake_attachments\".\"status\" = 'claimed' and \"intake_attachments\".\"task_key\" is not null and \"intake_attachments\".\"decided_at\" is not null and \"intake_attachments\".\"staging_object_key\" is null and \"intake_attachments\".\"candidate_key\" is null and \"intake_attachments\".\"verified_at\" is null)\n        or (\"intake_attachments\".\"status\" = 'released' and \"intake_attachments\".\"task_key\" is null and \"intake_attachments\".\"decided_at\" is not null and \"intake_attachments\".\"staging_object_key\" is null and \"intake_attachments\".\"candidate_key\" is null and \"intake_attachments\".\"verified_at\" is null)\n      )"
         }
       },
       "isRLSEnabled": false

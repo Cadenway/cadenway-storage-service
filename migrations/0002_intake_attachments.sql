@@ -55,8 +55,8 @@ CREATE TABLE "intake_attachments" (
 	CONSTRAINT "intake_attachments_lifecycle_check" CHECK ((
         ("intake_attachments"."status" = 'pending' and "intake_attachments"."staging_object_key" is not null and "intake_attachments"."candidate_key" is null and "intake_attachments"."verified_at" is null and "intake_attachments"."task_key" is null and "intake_attachments"."decided_at" is null)
         or ("intake_attachments"."status" = 'verified' and "intake_attachments"."staging_object_key" is not null and "intake_attachments"."candidate_key" is not null and "intake_attachments"."verified_at" is not null and "intake_attachments"."task_key" is null and "intake_attachments"."decided_at" is null)
-        or ("intake_attachments"."status" = 'claimed' and "intake_attachments"."task_key" is not null and "intake_attachments"."decided_at" is not null)
-        or ("intake_attachments"."status" = 'released' and "intake_attachments"."task_key" is null and "intake_attachments"."decided_at" is not null)
+        or ("intake_attachments"."status" = 'claimed' and "intake_attachments"."task_key" is not null and "intake_attachments"."decided_at" is not null and "intake_attachments"."staging_object_key" is null and "intake_attachments"."candidate_key" is null and "intake_attachments"."verified_at" is null)
+        or ("intake_attachments"."status" = 'released' and "intake_attachments"."task_key" is null and "intake_attachments"."decided_at" is not null and "intake_attachments"."staging_object_key" is null and "intake_attachments"."candidate_key" is null and "intake_attachments"."verified_at" is null)
       ))
 );
 --> statement-breakpoint

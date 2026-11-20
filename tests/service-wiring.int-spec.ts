@@ -626,6 +626,157 @@ describe('storage-service wiring', () => {
     );
   });
 
+  it('scrubs terminal intake declarations and receipts while retaining the object ledger and claimed file', async () => {
+    const tenant: TenantTransactionRunner = service().get(TenantTransactionRunner);
+    const receiptCodec = new UploadReceiptCodec({
+      activeKeyId: 'intake-test',
+      keys: [{ id: 'intake-test', key: randomBytes(32).toString('base64url') }],
+    });
+    const abort = new Error('rollback intake privacy fixture');
+    const scopeContext = {
+      organizationId: atelierNordId,
+      actor: { type: 'system' as const, id: null },
+      role: null,
+      scopes: [],
+    };
+    await expect(
+      runWithOrganizationContext(scopeContext, () =>
+        tenant.run(async (scope) => {
+          for (const [index, decision] of ['released', 'claimed'].entries()) {
+            const identity = {
+              organizationId: atelierNordId,
+              publicationId: '019a7001-2b3c-7d4e-8f5a-6b7c8d9e0f13',
+              attachmentId: `019a7004-3b2c-7d4e-8f5a-6b7c8d9e0f9${String(index)}`,
+            };
+            const reservedAt = new Date();
+            const staging = `intake/019a7006-7a8b-7c9d-8e0f-1a2b3c4d5e9${String(index)}`;
+            const candidate = `org/${atelierNordId}/019a7006-7a8b-7c9d-8e0f-1a2b3c4d5d9${String(index)}`;
+            const reserved = IntakeAttachment.reserve({
+              ...identity,
+              id: identity.attachmentId,
+              stagingObjectKey: staging,
+              fileName: 'applicant-private.png',
+              contentType: 'image/png',
+              sizeBytes: 42,
+              reservedAt,
+              expiresAt: new Date(reservedAt.getTime() + 1_800_000),
+            });
+            let files = 0;
+            const store = () =>
+              new DrizzleIntakeAttachmentTransaction(
+                scope,
+                atelierNordId,
+                () => Promise.resolve(),
+                () => {
+                  files += 1;
+                  return Promise.resolve();
+                },
+                receiptCodec,
+              );
+            const signing = store();
+            await signing.lock(identity);
+            expect((await signing.beginSigning(reserved)).kind).toBe('acquired');
+            const verificationAt = new Date(reservedAt.getTime() + 1000);
+            const verified = reserved.verify(
+              candidate,
+              { sizeBytes: 42, contentType: 'image/png', verifiedContentType: 'image/png' },
+              verificationAt,
+            );
+            if (verified.event === null) throw new Error('Expected verified event.');
+            await signing.registerCandidate(
+              identity,
+              candidate,
+              reserved.snapshot.reservation?.expiresAt ?? reservedAt,
+            );
+            expect(
+              await signing.electVerified(
+                identity,
+                verified.intakeAttachment,
+                candidate,
+                verified.event,
+              ),
+            ).toBe(true);
+            const active = await signing.lock(identity);
+            expect(active?.snapshot).toMatchObject({
+              status: 'verified',
+              candidateKey: candidate,
+              reservation: { fileName: 'applicant-private.png' },
+            });
+            const terminal = store();
+            if (decision === 'claimed') await terminal.lockTask(`CAD-${String(490 + index)}`);
+            const current = await terminal.lock(identity);
+            if (current === null) throw new Error('Expected reservation.');
+            const change =
+              decision === 'claimed'
+                ? current.claim(`CAD-${String(490 + index)}`, false, verificationAt)
+                : null;
+            await terminal.saveDecision(
+              identity,
+              change?.intakeAttachment ?? current.release(verificationAt),
+              change?.attachment ?? null,
+              change?.event ?? null,
+            );
+            const keys = [identity.organizationId, identity.publicationId, identity.attachmentId];
+            const stored = await scope.client.query(
+              'select * from intake_attachments where organization_id=$1 and publication_id=$2 and id=$3',
+              keys,
+            );
+            expect(stored.rows[0]).toMatchObject({
+              status: decision,
+              staging_object_key: null,
+              file_name: null,
+              content_type: null,
+              size_bytes: null,
+              reserved_at: null,
+              expires_at: null,
+              upload_expires_at: null,
+              candidate_key: null,
+              verified_at: null,
+            });
+            expect(
+              (
+                await scope.client.query(
+                  'select * from intake_attachment_upload_claims where organization_id=$1 and publication_id=$2 and attachment_id=$3',
+                  keys,
+                )
+              ).rows,
+            ).toHaveLength(0);
+            const ledger = await scope.client.query(
+              'select object_key, status from intake_attachment_candidates where organization_id=$1 and publication_id=$2 and attachment_id=$3 order by object_key',
+              keys,
+            );
+            expect(ledger.rows).toHaveLength(2);
+            expect(ledger.rows).toContainEqual({
+              object_key: candidate,
+              status: decision === 'claimed' ? 'elected' : 'fenced',
+            });
+            const restored = await terminal.lock(identity);
+            expect(restored?.snapshot).toMatchObject({
+              status: decision,
+              reservation: null,
+              candidateKey: null,
+              verifiedAt: null,
+            });
+            expect(
+              restored?.claim(`CAD-${String(490 + index)}`, false, verificationAt).event,
+            ).toBeNull();
+            const attachment = await scope.client.query(
+              'select file_name, elected_object_key from attachments where organization_id=$1 and id=$2',
+              [atelierNordId, identity.attachmentId],
+            );
+            if (decision === 'claimed')
+              expect(attachment.rows).toEqual([
+                { file_name: 'applicant-private.png', elected_object_key: candidate },
+              ]);
+            else expect(attachment.rows).toHaveLength(0);
+            expect(files).toBe(decision === 'claimed' ? 1 : 0);
+          }
+          throw abort;
+        }),
+      ),
+    ).rejects.toBe(abort);
+  });
+
   it('hides purged-task attachments from every reader before cleanup while retaining live tasks', async () => {
     const tenant: TenantTransactionRunner = service().get(TenantTransactionRunner);
     const reader = new DrizzleAttachmentReader(tenant);

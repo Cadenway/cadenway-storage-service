@@ -44,8 +44,8 @@ export const intakeAttachments = pgTable(
       sql`(
         (${table.status} = 'pending' and ${table.stagingObjectKey} is not null and ${table.candidateKey} is null and ${table.verifiedAt} is null and ${table.taskKey} is null and ${table.decidedAt} is null)
         or (${table.status} = 'verified' and ${table.stagingObjectKey} is not null and ${table.candidateKey} is not null and ${table.verifiedAt} is not null and ${table.taskKey} is null and ${table.decidedAt} is null)
-        or (${table.status} = 'claimed' and ${table.taskKey} is not null and ${table.decidedAt} is not null)
-        or (${table.status} = 'released' and ${table.taskKey} is null and ${table.decidedAt} is not null)
+        or (${table.status} = 'claimed' and ${table.taskKey} is not null and ${table.decidedAt} is not null and ${table.stagingObjectKey} is null and ${table.candidateKey} is null and ${table.verifiedAt} is null)
+        or (${table.status} = 'released' and ${table.taskKey} is null and ${table.decidedAt} is not null and ${table.stagingObjectKey} is null and ${table.candidateKey} is null and ${table.verifiedAt} is null)
       )`,
     ),
     organizationPolicy('intake_attachments_organization_isolation'),

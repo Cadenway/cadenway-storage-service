@@ -419,12 +419,27 @@ export class DrizzleIntakeAttachmentTransaction implements IntakeAttachmentTrans
         taskKey: state.taskKey,
         decidedAt: state.decidedAt,
       });
+      await this.scope.db.delete(intakeAttachmentUploadClaims).where(this.matchClaim(identity));
       return;
     }
     await this.scope.db
       .update(intakeAttachments)
-      .set({ status: state.status, taskKey: state.taskKey, decidedAt: state.decidedAt })
+      .set({
+        status: state.status,
+        taskKey: state.taskKey,
+        decidedAt: state.decidedAt,
+        stagingObjectKey: null,
+        fileName: null,
+        contentType: null,
+        sizeBytes: null,
+        reservedAt: null,
+        expiresAt: null,
+        uploadExpiresAt: null,
+        candidateKey: null,
+        verifiedAt: null,
+      })
       .where(this.match(identity));
+    await this.scope.db.delete(intakeAttachmentUploadClaims).where(this.matchClaim(identity));
     if (attachment === null) {
       await this.scope.db
         .update(intakeAttachmentCandidates)
