@@ -43,7 +43,7 @@ export class CompleteIntakeAttachmentUpload {
       stagingKey: preparation,
       candidateKey,
     });
-    return this.work.run(input.organizationId, async (store) => {
+    const result = await this.work.run(input.organizationId, async (store) => {
       const current = await store.lock(input);
       if (current === null) throw new AttachmentRefusal('not-found');
       const state = current.snapshot;
@@ -64,7 +64,8 @@ export class CompleteIntakeAttachmentUpload {
         (await store.lockAndReadVerifiedBytes()) + BigInt(verification.sizeBytes) >
           this.storageLimit
       ) {
-        throw new AttachmentRefusal('storage-quota-exceeded');
+        await store.scheduleCandidateCleanup(input, candidateKey);
+        return { quotaExceeded: true as const };
       }
       if (
         change.event !== null &&
@@ -74,6 +75,8 @@ export class CompleteIntakeAttachmentUpload {
       }
       return { id: input.attachmentId };
     });
+    if ('quotaExceeded' in result) throw new AttachmentRefusal('storage-quota-exceeded');
+    return result;
   }
   // #endregion
 }

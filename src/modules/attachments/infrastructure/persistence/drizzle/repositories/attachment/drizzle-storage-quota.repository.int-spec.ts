@@ -10,6 +10,8 @@ import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { DrizzleAttachmentTransaction } from './drizzle-attachment-transaction.repository.js';
+import { DrizzleAttachmentCleanupTransaction } from './drizzle-attachment-cleanup-transaction.repository.js';
+import { DrizzleIntakeAttachmentCleanupTransaction } from './drizzle-intake-attachment-cleanup-transaction.repository.js';
 import { DrizzleIntakeAttachmentTransaction } from './drizzle-intake-attachment-transaction.repository.js';
 
 const project = `cadenway-storage-quota-test-${String(process.pid)}`;
@@ -63,6 +65,90 @@ describe('storage verified byte admission', () => {
   afterAll(async () => {
     await pool?.end();
     compose('down', '--volumes', '--remove-orphans');
+  });
+
+  it('schedules only the refused copies for cleanup before their reservations expire', async () => {
+    const normalId = '01938f6e-0000-7000-8000-000000000005';
+    const intakeId = '01938f6e-0000-7000-8000-000000000006';
+    const identity = { organizationId, publicationId, attachmentId: intakeId };
+    const keys = ['normal-rejected', 'normal-sibling', 'normal-elected'];
+    const intakeKeys = ['intake-rejected', 'intake-sibling', 'intake-elected'];
+    const insert = (tenantId: string): Promise<void> =>
+      inOrganization(tenantId, () =>
+        tenant.run(async (scope) => {
+          await scope.client.query(
+            `insert into attachments
+             (organization_id, id, task_key, author_user_id, object_key, staging_object_key,
+              file_name, content_type, size_bytes, status, scan_status, version, reserved_at, expires_at)
+             values ($1, $2, 'CAD-482', $3, 'org/' || $1::uuid::text || '/' || $2::uuid::text,
+                     'org/' || $1::uuid::text || '/01938f6e-0000-7000-8000-000000000007',
+                     'normal.txt', 'text/plain', 10, 'pending', 'pending', 0, now(), now() + interval '1 day')`,
+            [tenantId, normalId, actorId],
+          );
+          await scope.client.query(
+            `insert into intake_attachments
+             (organization_id, publication_id, id, status, staging_object_key, file_name,
+              content_type, size_bytes, reserved_at, expires_at, upload_expires_at)
+             values ($1, $2, $3, 'pending', 'intake/01938f6e-0000-7000-8000-000000000008', 'intake.txt', 'text/plain', 10,
+                     now(), now() + interval '1 day', now() + interval '4 minutes')`,
+            [tenantId, publicationId, intakeId],
+          );
+          for (const [index, key] of keys.entries()) {
+            await scope.client.query(
+              `insert into attachment_candidates (organization_id, attachment_id, object_key, status, cleanup_after)
+               values ($1, $2, $3, $4, now() + interval '1 day')`,
+              [tenantId, normalId, key, index === 2 ? 'elected' : 'active'],
+            );
+          }
+          for (const [index, key] of intakeKeys.entries()) {
+            await scope.client.query(
+              `insert into intake_attachment_candidates
+               (organization_id, publication_id, attachment_id, object_key, status, cleanup_after)
+               values ($1, $2, $3, $4, $5, now() + interval '1 day')`,
+              [tenantId, publicationId, intakeId, key, index === 2 ? 'elected' : 'active'],
+            );
+          }
+        }),
+      );
+    await insert(organizationId);
+    await insert(otherOrganizationId);
+
+    await inOrganization(organizationId, () =>
+      tenant.run(async (scope) => {
+        const normal = new DrizzleAttachmentTransaction(scope, organizationId, vi.fn(), undefined);
+        const intake = new DrizzleIntakeAttachmentTransaction(
+          scope,
+          organizationId,
+          vi.fn(),
+          vi.fn(),
+          undefined,
+        );
+        await intake.lock(identity);
+        await normal.scheduleCandidateCleanup(normalId, 'normal-rejected');
+        await normal.scheduleCandidateCleanup(normalId, 'normal-elected');
+        await intake.scheduleCandidateCleanup(identity, 'intake-rejected');
+        await intake.scheduleCandidateCleanup(identity, 'intake-elected');
+      }),
+    );
+    for (const tenantId of [organizationId, otherOrganizationId]) {
+      const result = await inOrganization(tenantId, () =>
+        tenant.run(async (scope) => {
+          const normal = new DrizzleAttachmentCleanupTransaction(scope, tenantId, vi.fn());
+          const intake = new DrizzleIntakeAttachmentCleanupTransaction(scope, tenantId);
+          const cutoff = new Date();
+          return {
+            normal: await normal.fenceDueObjects(cutoff, null, 100),
+            intake: await intake.fenceDueObjects(cutoff, null, 100),
+          };
+        }),
+      );
+      expect(result.normal.objects.map(({ objectKey }) => objectKey)).toEqual(
+        tenantId === organizationId ? ['normal-rejected'] : [],
+      );
+      expect(result.intake.objects.map(({ objectKey }) => objectKey)).toEqual(
+        tenantId === organizationId ? ['intake-rejected'] : [],
+      );
+    }
   });
 
   it('serializes a normal and an Intake completion for the final bytes', async () => {
