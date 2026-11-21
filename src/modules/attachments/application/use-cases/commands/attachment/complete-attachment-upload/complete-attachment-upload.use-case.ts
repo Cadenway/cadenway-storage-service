@@ -46,7 +46,7 @@ export class CompleteAttachmentUpload {
       stagingKey: preparation.stagingKey,
       candidateKey,
     });
-    return this.work.run(input.organizationId, async (store) => {
+    const result = await this.work.run(input.organizationId, async (store) => {
       if (await store.lockTask(input.taskKey)) throw new AttachmentRefusal('not-found');
       const attachment = await store.lockAttachment(input.taskKey, input.attachmentId);
       if (attachment?.snapshot.authorUserId !== input.actorId.toLowerCase()) {
@@ -64,7 +64,8 @@ export class CompleteAttachmentUpload {
           (await store.lockAndReadVerifiedBytes()) + BigInt(verification.sizeBytes) >
             this.storageLimit
         ) {
-          throw new AttachmentRefusal('storage-quota-exceeded');
+          await store.scheduleCandidateCleanup(state.id, candidateKey);
+          return { quotaExceeded: true as const };
         }
         if (!(await store.electCandidate(change.attachment, candidateKey))) {
           throw new AttachmentRefusal('upload-not-ready');
@@ -73,6 +74,8 @@ export class CompleteAttachmentUpload {
       }
       return { attachment: attachmentView(change.attachment) };
     });
+    if ('quotaExceeded' in result) throw new AttachmentRefusal('storage-quota-exceeded');
+    return result;
   }
 
   /** Preserves the expiry response for the uploader after a pending reservation is swept. */

@@ -40,6 +40,7 @@ const verification = { sizeBytes: 20, contentType: 'image/png', verifiedContentT
 
 function fixture() {
   let transaction = false;
+  const committed = vi.fn();
   const store = {
     lock: vi.fn<IntakeAttachmentTransaction['lock']>().mockResolvedValue(reservation),
     beginSigning: vi.fn<IntakeAttachmentTransaction['beginSigning']>().mockResolvedValue({
@@ -56,6 +57,12 @@ function fixture() {
     registerCandidate: vi
       .fn<IntakeAttachmentTransaction['registerCandidate']>()
       .mockResolvedValue(undefined),
+    scheduleCandidateCleanup: vi
+      .fn<IntakeAttachmentTransaction['scheduleCandidateCleanup']>()
+      .mockImplementation(() => {
+        expect(transaction).toBe(true);
+        return Promise.resolve();
+      }),
     lockAndReadVerifiedBytes: vi
       .fn<IntakeAttachmentTransaction['lockAndReadVerifiedBytes']>()
       .mockResolvedValue(0n),
@@ -68,7 +75,9 @@ function fixture() {
       expect(organizationId).toBe(scope.organizationId);
       transaction = true;
       try {
-        return await callback(store);
+        const result = await callback(store);
+        committed();
+        return result;
       } finally {
         transaction = false;
       }
@@ -97,7 +106,7 @@ function fixture() {
     now: vi.fn(() => now),
     newId: vi.fn().mockResolvedValue(stagingId),
   } satisfies AttachmentRuntime;
-  return { store, work, objects, runtime };
+  return { store, work, objects, runtime, committed };
 }
 
 describe('Anonymous intake attachment transactions', () => {
@@ -158,6 +167,11 @@ describe('Anonymous intake attachment transactions', () => {
       reason: 'storage-quota-exceeded',
     });
     expect(f.store.electVerified).not.toHaveBeenCalled();
+    expect(f.store.scheduleCandidateCleanup).toHaveBeenCalledExactlyOnceWith(
+      scope,
+      `org/${scope.organizationId}/${stagingId}`,
+    );
+    expect(f.committed).toHaveBeenCalledTimes(2);
     await expect(operation.execute(scope)).resolves.toEqual({ id: scope.attachmentId });
     expect(f.store.electVerified).toHaveBeenCalledOnce();
   });

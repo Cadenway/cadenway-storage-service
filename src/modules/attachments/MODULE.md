@@ -144,8 +144,9 @@ Each lifecycle write owns its organization transaction. Finalization, deletion o
 commits the metadata change, the outbox fact when applicable and any pending cleanup work together.
 Calls to object storage run outside database transactions. Finalization rechecks the reservation
 under the same database lock as task revocation before committing, and concurrent completions
-must preserve the first accepted object and fact. Erasing a missing object is a successful
-cleanup retry.
+must preserve the first accepted object and fact. A quota denial makes only that active copy
+eligible for the next sweep and leaves its reservation available for another attempt. The denial
+is returned after the cleanup work commits. Erasing a missing object is a successful cleanup retry.
 
 The reservation commits a short signing lease and validates its ownership before persisting the
 signed expiry and encrypted response. The scheduled pg-boss sweep scans due work in bounded pages

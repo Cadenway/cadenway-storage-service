@@ -32,6 +32,9 @@ export interface IntakeAttachmentTransaction {
     cleanupAfter: Date,
   ): Promise<void>;
 
+  /** Schedules cleanup of this still-active candidate without affecting another completion. */
+  scheduleCandidateCleanup(identity: IntakeAttachmentIdentity, candidateKey: string): Promise<void>;
+
   /** Locks the tenant quota and reads ready and reserved bytes in this transaction. */
   lockAndReadVerifiedBytes(): Promise<bigint>;
 
