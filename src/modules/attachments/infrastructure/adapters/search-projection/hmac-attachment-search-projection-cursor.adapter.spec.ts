@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { HmacAttachmentProjectionCursor } from '../projection-cursor/hmac-attachment-projection-cursor.adapter.js';
 import { HmacAttachmentSearchProjectionCursor } from './hmac-attachment-search-projection-cursor.adapter.js';
 
 const organizationId = '01938f6e-6d1a-7c3e-9a51-2f0c4b8d7e10';
@@ -10,6 +11,23 @@ const position = {
 };
 
 describe('HmacAttachmentSearchProjectionCursor', () => {
+  it('keeps existing Search cursors readable and distinct from Billing cursors', () => {
+    const fixture =
+      'v1.MDE5YTcwMDQtM2IyYy03ZDRlLThmNWEtNmI3YzhkOWUwZjE1OjAxOWE3MDA0LTNiMmMtN2Q0ZS04ZjVhLTZiN2M4ZDllMGYxMQ.E2MwLhMsa9sgji1SsPLwOxV3UTM8zTz_FFGlKBb-tnw';
+    const key = Buffer.alloc(32, 3);
+    const search = new HmacAttachmentSearchProjectionCursor(key);
+    const billing = new HmacAttachmentProjectionCursor(key, 'billing');
+    const billingPosition = { upperId: position.upperFileId, afterId: position.afterFileId };
+    const billingCursor = billing.encode(organizationId, billingPosition);
+
+    expect(search.encode(organizationId, position)).toBe(fixture);
+    expect(search.decode(organizationId, fixture)).toEqual(position);
+    expect(billing.decode(organizationId, billingCursor)).toEqual(billingPosition);
+    expect(billing.decode(otherOrganizationId, billingCursor)).toBeNull();
+    expect(billing.decode(organizationId, fixture)).toBeNull();
+    expect(search.decode(organizationId, billingCursor)).toBeNull();
+  });
+
   it('keeps continuations stable across adapter instances with the same key', () => {
     const key = Buffer.alloc(32, 3);
     const writer = new HmacAttachmentSearchProjectionCursor(key);

@@ -37,6 +37,11 @@ cursor fixes the upper UUID bound for the export. The projection includes ready 
 whose task Storage has not fenced for permanent purge. Task owns the current visibility
 decision. Resolution returns the retained terminal version of a deleted attachment.
 
+The signed Billing system identity can page `GET /internal/v1/billing-attachment-usage`.
+It uses the signed organization and a separate cursor scope. Each returned row carries the
+verified ready bytes or a retained terminal version. A task purge changes measured usage when
+Storage commits the attachment deletion. The endpoint and its refusals are private and uncacheable.
+
 The P4 routes are defined in `openapi/internal/storage-service.yaml`.
 
 | Route                                                                     | Purpose                              |
@@ -123,6 +128,10 @@ system actor on its `file.uploaded.v1` fact. A release suppresses a later start 
 Search exports read the upper bound and page in an organization-scoped `REPEATABLE READ READ
 ONLY` snapshot. Search resolution reads the attachment rows and their task purge fences in one
 organization-scoped query.
+
+The Billing usage reader uses a tenant snapshot and a fixed upper attachment ID. It reads the
+verified size of a ready attachment and the terminal version of a previously ready attachment.
+A task purge leaves the attachment in measured usage until Storage commits its deletion.
 
 Each lifecycle write owns its organization transaction. Finalization, deletion or purge cleanup
 commits the metadata change, the outbox fact when applicable and any pending cleanup work together.

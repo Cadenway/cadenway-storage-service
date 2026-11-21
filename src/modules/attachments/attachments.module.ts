@@ -21,9 +21,11 @@ import {
   getAttachmentDownloadProvider,
 } from './composition/providers/use-cases/attachment/attachment-query.provider.js';
 import { purgeExpiredUploadReceiptsProvider } from './composition/providers/use-cases/attachment/purge-expired-upload-receipts.provider.js';
+import { listBillingAttachmentUsageProvider } from './composition/providers/use-cases/billing/list-billing-attachment-usage.provider.js';
 import { intakeAttachmentCommandProviders } from './composition/providers/use-cases/intake-attachment/intake-attachment-command.provider.js';
 import { attachmentSearchProjectionProviders } from './composition/providers/use-cases/search-projection/attachment-search-projection.provider.js';
 import { AttachmentsController } from './presentation/http/controllers/attachment/attachments.controller.js';
+import { BillingAttachmentUsageController } from './presentation/http/controllers/billing/billing-attachment-usage.controller.js';
 import { IntakeAttachmentsController } from './presentation/http/controllers/intake-attachment/intake-attachments.controller.js';
 import { AttachmentSearchProjectionsController } from './presentation/http/controllers/search-projection/attachment-search-projections.controller.js';
 
@@ -33,6 +35,7 @@ import { AttachmentSearchProjectionsController } from './presentation/http/contr
     AttachmentsController,
     IntakeAttachmentsController,
     AttachmentSearchProjectionsController,
+    BillingAttachmentUsageController,
   ],
   providers: [
     attachmentFactWriterProvider,
@@ -43,6 +46,7 @@ import { AttachmentSearchProjectionsController } from './presentation/http/contr
     ...intakeAttachmentCommandProviders,
     ...attachmentQueryProviders,
     ...attachmentSearchProjectionProviders,
+    listBillingAttachmentUsageProvider,
     getAttachmentDownloadProvider,
     purgeExpiredUploadReceiptsProvider,
     purgeUploadReceiptsHandlerProvider(PURGE_UPLOAD_RECEIPTS_QUEUE),

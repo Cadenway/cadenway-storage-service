@@ -7,9 +7,9 @@
 # documents every variable below in docs/service-environment.md. A variable added here must exist
 # on the host before the release that reads it: the GitOps agent refuses a commit leaving one unset.
 #
-# INTERNAL_TOKEN_TRUSTED_ISSUERS supplies the Gateway trust list as one line of JSON. Search
-# projection routes opt in through the public Search keys and a Storage cursor key shared by
-# replicas. These two settings can be empty during a staged rollout.
+# INTERNAL_TOKEN_TRUSTED_ISSUERS supplies the Gateway trust list as one line of JSON. Search and
+# Billing exports opt in through their public issuer keys and their separate Storage cursor keys
+# shared by replicas. These settings can be empty during a staged rollout.
 #
 # The S3_* variables are the object storage of the attachments, each from STORAGE_S3_* in
 # cadenway-ops. S3_ENDPOINT is where the service reaches it; S3_PUBLIC_ENDPOINT is the host the
@@ -34,6 +34,8 @@ services:
         {"api-gateway": [${API_GATEWAY_INTERNAL_TOKEN_PUBLIC_JWKS}]}
       SEARCH_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS: ${SEARCH_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS:-}
       SEARCH_PROJECTION_CURSOR_SECRET: ${STORAGE_SEARCH_PROJECTION_CURSOR_SECRET:-}
+      BILLING_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS: ${BILLING_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS:-}
+      BILLING_PROJECTION_CURSOR_SECRET: ${STORAGE_BILLING_PROJECTION_CURSOR_SECRET:-}
       S3_ENDPOINT: ${STORAGE_S3_ENDPOINT}
       S3_PUBLIC_ENDPOINT: ${STORAGE_S3_PUBLIC_ENDPOINT}
       S3_REGION: ${STORAGE_S3_REGION}

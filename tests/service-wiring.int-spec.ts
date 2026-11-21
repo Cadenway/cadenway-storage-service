@@ -19,7 +19,7 @@ import { SystemTransactionRunner, TenantTransactionRunner } from '@cadenway/nest
 import { Controller, Get, Injectable, Module } from '@nestjs/common';
 import type { BeforeApplicationShutdown } from '@nestjs/common';
 import type { NestExpressApplication } from '@nestjs/platform-express';
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import pg from 'pg';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -51,6 +51,7 @@ import { DrizzleAttachmentReconciliation } from '../src/modules/attachments/infr
 import { DrizzleAttachmentTransaction } from '../src/modules/attachments/infrastructure/persistence/drizzle/repositories/attachment/drizzle-attachment-transaction.repository.js';
 import { DrizzleExpiredUploadReceipts } from '../src/modules/attachments/infrastructure/persistence/drizzle/repositories/attachment/drizzle-expired-upload-receipts.repository.js';
 import { DrizzleIntakeAttachmentTransaction } from '../src/modules/attachments/infrastructure/persistence/drizzle/repositories/attachment/drizzle-intake-attachment-transaction.repository.js';
+import { DrizzleBillingAttachmentUsageReader } from '../src/modules/attachments/infrastructure/persistence/drizzle/repositories/billing/drizzle-billing-attachment-usage.repository.js';
 import { DrizzleAttachmentSearchProjectionReader } from '../src/modules/attachments/infrastructure/persistence/drizzle/repositories/search-projection/drizzle-attachment-search-projection-reader.repository.js';
 import { attachmentTaskTombstones } from '../src/modules/attachments/infrastructure/persistence/drizzle/schemas/attachment/attachment-task-tombstones.schema.js';
 import { attachments } from '../src/modules/attachments/infrastructure/persistence/drizzle/schemas/attachment/attachments.schema.js';
@@ -2526,6 +2527,137 @@ describe('storage-service wiring', () => {
     } finally {
       for (const id of [organizationId, foreignOrganizationId]) {
         await asSearch(id, () =>
+          tenant.run(async ({ db }) => {
+            await db.delete(attachments).where(eq(attachments.organizationId, id));
+            await db
+              .delete(attachmentTaskTombstones)
+              .where(eq(attachmentTaskTombstones.organizationId, id));
+          }),
+        );
+      }
+    }
+  });
+
+  it('exports bounded Billing usage across tombstones, task purge and tenants', async () => {
+    const tenant: TenantTransactionRunner = service().get(TenantTransactionRunner);
+    const reader = new DrizzleBillingAttachmentUsageReader(tenant);
+    const organizationId = '019a7004-3b2c-7d4e-8f5a-6b7c8d9e1101';
+    const foreignOrganizationId = '019a7004-3b2c-7d4e-8f5a-6b7c8d9e1102';
+    const first = '019a7004-3b2c-7d4e-8f5a-6b7c8d9e1111';
+    const removed = '019a7004-3b2c-7d4e-8f5a-6b7c8d9e1112';
+    const upper = '019a7004-3b2c-7d4e-8f5a-6b7c8d9e1113';
+    const pending = '019a7004-3b2c-7d4e-8f5a-6b7c8d9e1114';
+    const discarded = '019a7004-3b2c-7d4e-8f5a-6b7c8d9e1115';
+    const added = '019a7004-3b2c-7d4e-8f5a-6b7c8d9e1116';
+    const foreign = '019a7004-3b2c-7d4e-8f5a-6b7c8d9e1117';
+    const timestamp = new Date('2026-11-20T08:00:00.000Z');
+    const asBilling = <T>(id: string, work: () => Promise<T>): Promise<T> =>
+      runWithOrganizationContext(
+        {
+          organizationId: id,
+          actor: { type: 'system', id: 'billing-service' },
+          role: null,
+          scopes: [],
+        },
+        work,
+      );
+    const file = (
+      id: string,
+      status: 'ready' | 'pending' | 'deleted',
+      wasReady: boolean,
+      owner = organizationId,
+    ): typeof attachments.$inferInsert => ({
+      organizationId: owner,
+      id,
+      taskKey: 'CAD-711',
+      fileName: 'fixture.pdf',
+      objectKey: `org/${owner}/${id}`,
+      stagingObjectKey: `org/${owner}/stage-${id}`,
+      contentType: 'application/pdf',
+      sizeBytes: 128,
+      status,
+      scanStatus: wasReady ? 'verified' : 'pending',
+      version: status === 'deleted' ? 2 : 1,
+      reservedAt: timestamp,
+      expiresAt: new Date('2026-11-20T09:00:00.000Z'),
+      uploadedAt: wasReady ? timestamp : null,
+      deletedAt: status === 'deleted' ? timestamp : null,
+    });
+
+    try {
+      await asBilling(organizationId, () =>
+        tenant.run(async ({ db }) => {
+          await db
+            .insert(attachments)
+            .values([
+              file(first, 'ready', true),
+              file(removed, 'ready', true),
+              file(upper, 'deleted', true),
+              file(pending, 'pending', false),
+              file(discarded, 'deleted', false),
+            ]);
+          await db.insert(attachmentTaskTombstones).values({
+            organizationId,
+            taskKey: 'CAD-711',
+            purgedAt: timestamp,
+            purgeActorType: 'system',
+            purgeActorId: 'task-service',
+            cleanupPending: true,
+          });
+        }),
+      );
+      await asBilling(foreignOrganizationId, () =>
+        tenant.run(({ db }) =>
+          db.insert(attachments).values(file(foreign, 'ready', true, foreignOrganizationId)),
+        ),
+      );
+
+      expect(await asBilling(organizationId, () => reader.read(organizationId, null, 1))).toEqual({
+        upperId: upper,
+        items: [{ fileId: first, version: 1, state: 'ready', sizeBytes: 128 }],
+      });
+      await asBilling(organizationId, () =>
+        tenant.run(async ({ db }) => {
+          await db
+            .update(attachments)
+            .set({ status: 'deleted', version: 2, deletedAt: timestamp })
+            .where(
+              and(eq(attachments.organizationId, organizationId), eq(attachments.id, removed)),
+            );
+          await db.insert(attachments).values(file(added, 'ready', true));
+        }),
+      );
+      expect(
+        await asBilling(organizationId, () =>
+          reader.read(organizationId, { upperId: upper, afterId: first }, 101),
+        ),
+      ).toEqual({
+        upperId: upper,
+        items: [
+          { fileId: removed, version: 2, state: 'deleted' },
+          { fileId: upper, version: 2, state: 'deleted' },
+        ],
+      });
+      expect(await asBilling(organizationId, () => reader.read(organizationId, null, 101))).toEqual(
+        {
+          upperId: added,
+          items: [
+            { fileId: first, version: 1, state: 'ready', sizeBytes: 128 },
+            { fileId: removed, version: 2, state: 'deleted' },
+            { fileId: upper, version: 2, state: 'deleted' },
+            { fileId: added, version: 1, state: 'ready', sizeBytes: 128 },
+          ],
+        },
+      );
+      await expect(
+        asBilling(foreignOrganizationId, () => reader.read(organizationId, null, 1)),
+      ).rejects.toThrow('Billing attachment usage tenant mismatch.');
+      await expect(
+        asBilling(organizationId, () => reader.read(organizationId, null, 102)),
+      ).rejects.toThrow('The Billing attachment usage page exceeds its bound.');
+    } finally {
+      for (const id of [organizationId, foreignOrganizationId]) {
+        await asBilling(id, () =>
           tenant.run(async ({ db }) => {
             await db.delete(attachments).where(eq(attachments.organizationId, id));
             await db

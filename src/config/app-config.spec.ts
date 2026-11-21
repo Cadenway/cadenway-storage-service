@@ -25,6 +25,12 @@ describe('appConfigSchema', () => {
     x: randomBytes(32).toString('base64url'),
     kid,
   }));
+  const billingKey = {
+    kty: 'OKP',
+    crv: 'Ed25519',
+    x: randomBytes(32).toString('base64url'),
+    kid: 'billing-current',
+  };
   const objectStorage: Readonly<Record<string, string>> = {
     S3_ENDPOINT: 'http://garage:3900',
     S3_PUBLIC_ENDPOINT: 'https://files.example.test',
@@ -79,12 +85,14 @@ describe('appConfigSchema', () => {
     expect(() => loadConfig(migrationConfigSchema, example)).not.toThrow();
   });
 
-  it('keeps Search settings optional when staged deployment passes empty variables', () => {
+  it('keeps export settings optional when staged deployment passes empty variables', () => {
     expect(
       loadConfig(appConfigSchema, {
         ...complete,
         SEARCH_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS: '',
         SEARCH_PROJECTION_CURSOR_SECRET: '',
+        BILLING_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS: '',
+        BILLING_PROJECTION_CURSOR_SECRET: '',
       }),
     ).toStrictEqual(loadConfig(appConfigSchema, complete));
   });
@@ -117,6 +125,43 @@ describe('appConfigSchema', () => {
     });
 
     expect(config.INTERNAL_TOKEN_TRUSTED_ISSUERS).toEqual(expected);
+  });
+
+  it('combines both issuer fallbacks and honors the explicit Billing trust map', () => {
+    const input = {
+      ...complete,
+      SEARCH_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS: searchKeys
+        .map((key) => JSON.stringify(key))
+        .join(','),
+      BILLING_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS: JSON.stringify(billingKey),
+      BILLING_PROJECTION_CURSOR_SECRET: randomBytes(32).toString('base64url'),
+    };
+    const config = loadConfig(appConfigSchema, input);
+    expect(config.INTERNAL_TOKEN_TRUSTED_ISSUERS).toEqual({
+      ...loadConfig(appConfigSchema, complete).INTERNAL_TOKEN_TRUSTED_ISSUERS,
+      'search-service': searchKeys,
+      'billing-service': [billingKey],
+    });
+    expect(config.BILLING_PROJECTION_CURSOR_SECRET).toBe(input.BILLING_PROJECTION_CURSOR_SECRET);
+    expect(config).not.toHaveProperty('BILLING_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS');
+
+    const explicit = loadConfig(appConfigSchema, {
+      ...input,
+      INTERNAL_TOKEN_TRUSTED_ISSUERS: JSON.stringify(config.INTERNAL_TOKEN_TRUSTED_ISSUERS),
+      BILLING_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS: 'obsolete-fallback',
+    });
+    expect(explicit.INTERNAL_TOKEN_TRUSTED_ISSUERS).toEqual(config.INTERNAL_TOKEN_TRUSTED_ISSUERS);
+  });
+
+  it('reports invalid Billing settings without exposing their values', () => {
+    for (const setting of [
+      'BILLING_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS',
+      'BILLING_PROJECTION_CURSOR_SECRET',
+    ]) {
+      const input = { ...complete, [setting]: 'fixture-sensitive-value' };
+      expect(() => loadConfig(appConfigSchema, input)).toThrow(setting);
+      expect(() => loadConfig(appConfigSchema, input)).not.toThrow(/fixture-sensitive-value/u);
+    }
   });
 
   it('refuses malformed or private Search fallback keys without echoing the supplied value', () => {
