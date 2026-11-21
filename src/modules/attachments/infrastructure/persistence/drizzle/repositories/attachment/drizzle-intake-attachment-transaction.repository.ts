@@ -19,6 +19,7 @@ import { attachments } from '../../schemas/attachment/attachments.schema.js';
 import { intakeAttachmentCandidates } from '../../schemas/attachment/intake-attachment-candidates.schema.js';
 import { intakeAttachmentUploadClaims } from '../../schemas/attachment/intake-attachment-upload-claims.schema.js';
 import { intakeAttachments } from '../../schemas/attachment/intake-attachments.schema.js';
+import { DrizzleStorageQuota } from './drizzle-storage-quota.repository.js';
 
 type Row = typeof intakeAttachments.$inferSelect;
 type VerificationWriter = (fact: IntakeAttachmentVerified) => Promise<void>;
@@ -110,6 +111,9 @@ export class DrizzleIntakeAttachmentTransaction implements IntakeAttachmentTrans
   /** Canonical tenant bound to all reads and writes. */
   private readonly organizationId: string;
 
+  /** Shared quota check bound to this transaction and organization. */
+  private readonly quota: DrizzleStorageQuota;
+
   /** Allocations serialized in this transaction. */
   private readonly locked = new Set<string>();
 
@@ -132,10 +136,17 @@ export class DrizzleIntakeAttachmentTransaction implements IntakeAttachmentTrans
     )
       throw new Error('Intake attachment requires its tenant transaction.');
     this.organizationId = organizationId.toLowerCase();
+    this.quota = new DrizzleStorageQuota(scope, this.organizationId);
   }
   // #endregion
 
   // #region Methods
+  /** Locks quota admission and reads the current tenant usage in a subsequent statement. */
+  public async lockAndReadVerifiedBytes(): Promise<bigint> {
+    await this.quota.lock();
+    return this.quota.usedBytes();
+  }
+
   /** Serializes even a missing allocation against release-before-start. */
   public async lock(identity: IntakeAttachmentIdentity): Promise<IntakeAttachment | null> {
     const key = this.key(identity);

@@ -15,6 +15,7 @@ import { attachmentCandidates } from '../../schemas/attachment/attachment-candid
 import { attachmentTaskTombstones } from '../../schemas/attachment/attachment-task-tombstones.schema.js';
 import { attachmentUploadClaims } from '../../schemas/attachment/attachment-upload-claims.schema.js';
 import { attachments } from '../../schemas/attachment/attachments.schema.js';
+import { DrizzleStorageQuota } from './drizzle-storage-quota.repository.js';
 
 type FactWriter = (fact: AttachmentFact, actor: AttachmentActor) => Promise<void>;
 type UploadClaimScope = Pick<
@@ -37,6 +38,9 @@ export class DrizzleAttachmentTransaction implements AttachmentTransaction {
   // #region Properties
   /** Canonical organization ID used for locks and every query. */
   private readonly organizationId: string;
+
+  /** Shared quota check bound to this transaction and organization. */
+  private readonly quota: DrizzleStorageQuota;
   // #endregion
 
   // #region Constructor
@@ -54,10 +58,17 @@ export class DrizzleAttachmentTransaction implements AttachmentTransaction {
       throw new Error('Attachment transaction requires its tenant scope.');
     }
     this.organizationId = organizationId.toLowerCase();
+    this.quota = new DrizzleStorageQuota(scope, this.organizationId);
   }
   // #endregion
 
   // #region Methods
+  /** Locks quota admission and reads the current tenant usage in a subsequent statement. */
+  public async lockAndReadVerifiedBytes(): Promise<bigint> {
+    await this.quota.lock();
+    return this.quota.usedBytes();
+  }
+
   /** Creates a lockable row even for tasks with no prior attachments. */
   public async lockTask(taskKey: string): Promise<boolean> {
     const { db } = this.scope;

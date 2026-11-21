@@ -34,9 +34,13 @@ function reservation(): Attachment {
 function fixture(
   initial = reservation(),
   clock = () => now,
+  storageLimit: bigint | null = null,
 ): {
   readonly useCase: CompleteAttachmentUpload;
   readonly registerCandidate: ReturnType<typeof vi.fn<AttachmentTransaction['registerCandidate']>>;
+  readonly lockAndReadVerifiedBytes: ReturnType<
+    typeof vi.fn<AttachmentTransaction['lockAndReadVerifiedBytes']>
+  >;
   readonly electCandidate: ReturnType<typeof vi.fn<AttachmentTransaction['electCandidate']>>;
   readonly appendFact: ReturnType<typeof vi.fn<AttachmentTransaction['appendFact']>>;
   readonly lockAttachment: ReturnType<typeof vi.fn<AttachmentTransaction['lockAttachment']>>;
@@ -52,6 +56,9 @@ function fixture(
     return Promise.resolve(true);
   });
   const appendFact = vi.fn<AttachmentTransaction['appendFact']>();
+  const lockAndReadVerifiedBytes = vi
+    .fn<AttachmentTransaction['lockAndReadVerifiedBytes']>()
+    .mockResolvedValue(0n);
   const registerTaskPurge = vi.fn<AttachmentTransaction['registerTaskPurge']>();
   const lockAttachment = vi.fn<AttachmentTransaction['lockAttachment']>(() =>
     Promise.resolve(attachment),
@@ -66,6 +73,7 @@ function fixture(
     completeUploadClaim: vi.fn(),
     releaseUploadClaim: vi.fn(),
     registerCandidate,
+    lockAndReadVerifiedBytes,
     electCandidate,
     deleteAttachment: vi.fn(),
     appendFact,
@@ -87,6 +95,7 @@ function fixture(
   };
   return {
     registerCandidate,
+    lockAndReadVerifiedBytes,
     electCandidate,
     appendFact,
     lockAttachment,
@@ -94,10 +103,12 @@ function fixture(
     registerTaskPurge,
     work,
     copy,
-    useCase: new CompleteAttachmentUpload(work, objects, {
-      now: clock,
-      newId: () => Promise.resolve(candidateId),
-    }),
+    useCase: new CompleteAttachmentUpload(
+      work,
+      objects,
+      { now: clock, newId: () => Promise.resolve(candidateId) },
+      storageLimit,
+    ),
   };
 }
 
@@ -105,7 +116,14 @@ describe('CompleteAttachmentUpload', () => {
   const input = { organizationId, actorId, taskKey: 'CAD-482', attachmentId };
 
   it('registers a candidate before copying and emits one fact across a successful replay', async () => {
-    const { useCase, registerCandidate, electCandidate, appendFact, copy } = fixture();
+    const {
+      useCase,
+      registerCandidate,
+      lockAndReadVerifiedBytes,
+      electCandidate,
+      appendFact,
+      copy,
+    } = fixture(reservation(), () => now, 20n);
     const first = await useCase.execute(input);
     const second = await useCase.execute(input);
     expect(second).toEqual(first);
@@ -115,7 +133,35 @@ describe('CompleteAttachmentUpload', () => {
       copy.mock.invocationCallOrder[0] ?? 0,
     );
     expect(electCandidate).toHaveBeenCalledTimes(1);
+    expect(lockAndReadVerifiedBytes).toHaveBeenCalledOnce();
     expect(appendFact).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses verified bytes over quota before election and leaves the upload retryable', async () => {
+    const { useCase, lockAndReadVerifiedBytes, electCandidate, appendFact } = fixture(
+      reservation(),
+      () => now,
+      20n,
+    );
+    lockAndReadVerifiedBytes.mockResolvedValueOnce(1n).mockResolvedValueOnce(0n);
+    await expect(useCase.execute(input)).rejects.toMatchObject({
+      reason: 'storage-quota-exceeded',
+    });
+    expect(electCandidate).not.toHaveBeenCalled();
+    expect(appendFact).not.toHaveBeenCalled();
+    await expect(useCase.execute(input)).resolves.toMatchObject({
+      attachment: { id: attachmentId },
+    });
+    expect(electCandidate).toHaveBeenCalledOnce();
+    expect(appendFact).toHaveBeenCalledOnce();
+  });
+
+  it('does not acquire the quota lock when enforcement is disabled', async () => {
+    const { useCase, lockAndReadVerifiedBytes } = fixture();
+    await expect(useCase.execute(input)).resolves.toMatchObject({
+      attachment: { id: attachmentId },
+    });
+    expect(lockAndReadVerifiedBytes).not.toHaveBeenCalled();
   });
 
   it('rejects metadata that does not describe the copied candidate without electing or publishing', async () => {

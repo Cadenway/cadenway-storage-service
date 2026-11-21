@@ -55,6 +55,7 @@ function fixture() {
       .mockResolvedValue({ kind: 'completed' }),
     releaseUploadClaim: vi.fn<AttachmentTransaction['releaseUploadClaim']>(),
     registerCandidate: vi.fn<AttachmentTransaction['registerCandidate']>(),
+    lockAndReadVerifiedBytes: vi.fn<AttachmentTransaction['lockAndReadVerifiedBytes']>(),
     electCandidate: vi.fn<AttachmentTransaction['electCandidate']>(),
     deleteAttachment: vi.fn<AttachmentTransaction['deleteAttachment']>(),
     appendFact: vi.fn<AttachmentTransaction['appendFact']>(),

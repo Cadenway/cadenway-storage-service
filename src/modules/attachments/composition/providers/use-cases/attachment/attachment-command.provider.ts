@@ -1,6 +1,8 @@
+import { CONFIG } from '@cadenway/nest-common';
 import { TenantTransactionRunner } from '@cadenway/nest-common/database';
 import type { FactoryProvider } from '@nestjs/common';
 
+import { freeStorageByteLimit, type AppConfig } from '../../../../../../config/app-config.js';
 import type { AttachmentObjectStore } from '../../../../application/ports/outbound/object-storage/attachment/attachment-object-store.port.js';
 import type { AttachmentRuntime } from '../../../../application/ports/outbound/runtime/attachment/attachment-runtime.port.js';
 import type { AttachmentUnitOfWork } from '../../../../application/ports/outbound/transactions/attachment/attachment-unit-of-work.port.js';
@@ -33,12 +35,19 @@ export const attachmentCommandProviders: readonly FactoryProvider[] = [
   },
   {
     provide: CompleteAttachmentUpload,
-    inject: [ATTACHMENT_UNIT_OF_WORK, ATTACHMENT_OBJECT_STORE, PostgresAttachmentRuntime],
+    inject: [ATTACHMENT_UNIT_OF_WORK, ATTACHMENT_OBJECT_STORE, PostgresAttachmentRuntime, CONFIG],
     useFactory: (
       work: AttachmentUnitOfWork,
       objects: AttachmentObjectStore,
       runtime: AttachmentRuntime,
-    ): CompleteAttachmentUpload => new CompleteAttachmentUpload(work, objects, runtime),
+      config: AppConfig,
+    ): CompleteAttachmentUpload =>
+      new CompleteAttachmentUpload(
+        work,
+        objects,
+        runtime,
+        config.STORAGE_BYTE_QUOTA_ENABLED ? freeStorageByteLimit : null,
+      ),
   },
   {
     provide: DeleteAttachment,

@@ -38,6 +38,13 @@ whose task Storage has not fenced for permanent purge. Task owns the current vis
 decision. Resolution returns the retained terminal version of a deleted attachment.
 
 The signed Billing system identity can page `GET /internal/v1/billing-attachment-usage`.
+
+With Free byte admission enabled, authenticated finalization and Intake verification add the
+actual verified bytes under the same tenant transaction lock. The quota counts ready files and
+verified Intake reservations, with a total limit of 2,000,000,000 bytes. A claim transfers its
+reservation to a ready file atomically. A verified reservation lasts until the authoritative
+claim or release. Rejected completion returns `409 attachment.storage-quota-exceeded` without
+plan, limit or usage details.
 It uses the signed organization and a separate cursor scope. Each returned row carries the
 verified ready bytes or a retained terminal version. A task purge changes measured usage when
 Storage commits the attachment deletion. The endpoint and its refusals are private and uncacheable.
