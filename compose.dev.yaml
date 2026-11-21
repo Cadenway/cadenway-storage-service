@@ -129,9 +129,10 @@ configs:
                   "evt.file.>",
                   "rebuild.*.file",
                   "$$JS.API.INFO", "$$JS.API.STREAM.NAMES", "$$JS.API.STREAM.INFO.EVENTS",
-                  "$$JS.API.CONSUMER.CREATE.EVENTS.>", "$$JS.API.CONSUMER.DURABLE.CREATE.EVENTS.*",
-                  "$$JS.API.CONSUMER.INFO.EVENTS.*", "$$JS.API.CONSUMER.MSG.NEXT.EVENTS.*",
-                  "$$JS.ACK.EVENTS.>"
+                  "$$JS.API.CONSUMER.CREATE.EVENTS.storage-service__record-task-purge.evt.task.purged.v1",
+                  "$$JS.API.CONSUMER.INFO.EVENTS.storage-service__record-task-purge",
+                  "$$JS.API.CONSUMER.MSG.NEXT.EVENTS.storage-service__record-task-purge",
+                  "$$JS.ACK.EVENTS.storage-service__record-task-purge.>"
                 ]
               }
               subscribe: { allow: ["_INBOX.storage.>", "rebuild.storage.>"] }

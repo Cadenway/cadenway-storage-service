@@ -7,4 +7,6 @@ import { startTelemetry } from '@cadenway/nest-common/telemetry';
 // metrics leave as OTLP over HTTP to OTEL_EXPORTER_OTLP_ENDPOINT; unset, spans are still created
 // (trace ids in the logs, `traceparent` propagated over HTTP and NATS) and nothing leaves the
 // process.
-startTelemetry({ service: 'storage-service' });
+// The exporter also replaces this literal wherever it appears in a recorded URL, including
+// requests whose path includes a bucket or an endpoint prefix before the object key.
+startTelemetry({ service: 'storage-service', sensitiveHttpPathPrefixes: ['/org/'] });

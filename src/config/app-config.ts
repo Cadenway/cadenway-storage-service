@@ -6,6 +6,63 @@ import { messagingConfigShape } from '@cadenway/nest-messaging';
 import type { MessagingConfig } from '@cadenway/nest-messaging';
 import { z } from 'zod';
 
+import { uploadReceiptKeyringSchema } from './upload-receipt-keyring.js';
+
+const storageEndpoint = z
+  .url({ protocol: /^https?$/u, error: 'Expected an HTTP or HTTPS object storage endpoint.' })
+  .refine((value) => {
+    const url = new URL(value);
+    return !url.username && !url.password && !url.search && !url.hash;
+  }, 'Object storage endpoints cannot contain credentials, queries or fragments.');
+
+const storageValue = z
+  .string()
+  .refine((value) => value.trim().length > 0, 'Expected a non-empty object storage setting.');
+
+const objectStorageInput = z.object({
+  S3_ENDPOINT: storageEndpoint,
+  S3_PUBLIC_ENDPOINT: storageEndpoint,
+  S3_REGION: storageValue,
+  S3_BUCKET: storageValue,
+  S3_ACCESS_KEY_ID: storageValue,
+  S3_SECRET_ACCESS_KEY: storageValue,
+  S3_FORCE_PATH_STYLE: z.enum(['true', 'false']).optional(),
+  STORAGE_UPLOAD_RECEIPT_KEYS: z.string(),
+});
+
+const optionalObjectStorage = objectStorageInput.partial().transform((input, context) => {
+  if (Object.keys(input).length === 0) return {};
+
+  const result = objectStorageInput.safeParse(input);
+  if (!result.success) {
+    for (const { path, message } of result.error.issues) {
+      context.addIssue({ code: 'custom', path, message });
+    }
+    return z.NEVER;
+  }
+
+  const receiptKeys = uploadReceiptKeyringSchema.safeParse(result.data.STORAGE_UPLOAD_RECEIPT_KEYS);
+  if (!receiptKeys.success) {
+    for (const { message } of receiptKeys.error.issues) {
+      context.addIssue({ code: 'custom', path: ['STORAGE_UPLOAD_RECEIPT_KEYS'], message });
+    }
+    return z.NEVER;
+  }
+
+  return {
+    objectStorage: Object.freeze({
+      endpoint: result.data.S3_ENDPOINT,
+      publicEndpoint: result.data.S3_PUBLIC_ENDPOINT,
+      region: result.data.S3_REGION,
+      bucket: result.data.S3_BUCKET,
+      accessKeyId: result.data.S3_ACCESS_KEY_ID,
+      secretAccessKey: result.data.S3_SECRET_ACCESS_KEY,
+      forcePathStyle: result.data.S3_FORCE_PATH_STYLE === 'true',
+      receiptKeys: receiptKeys.data,
+    }),
+  };
+});
+
 /**
  * Type AppConfig
  *
@@ -27,13 +84,18 @@ import { z } from 'zod';
  * - `INTERNAL_TOKEN_AUDIENCE` and `INTERNAL_TOKEN_TRUSTED_ISSUERS`: the `aud` this service accepts
  *   and the public keys of the backends allowed to call it.
  *
- * `OTEL_EXPORTER_OTLP_ENDPOINT` is read by `telemetry.ts`, before the application exists. The seven
- * `S3_*` variables of the object storage are set as well and join this schema with the first module
- * that stores a file.
+ * - `S3_*`: internal and browser-facing endpoints, bucket, region and credentials are required
+ *   together with `STORAGE_UPLOAD_RECEIPT_KEYS` when object storage is configured.
+ *   `S3_FORCE_PATH_STYLE` defaults to false.
+ *   Without any storage settings, the service runs with signed transfers unavailable.
  *
- * @type {BaseConfig & DatabaseConfig & MessagingConfig & InternalTokenVerifierConfig}
+ * `OTEL_EXPORTER_OTLP_ENDPOINT` is read by `telemetry.ts` before the application exists.
  */
-export type AppConfig = BaseConfig & DatabaseConfig & MessagingConfig & InternalTokenVerifierConfig;
+export type AppConfig = BaseConfig &
+  DatabaseConfig &
+  MessagingConfig &
+  InternalTokenVerifierConfig &
+  z.output<typeof optionalObjectStorage>;
 
 /**
  * Constant appConfigSchema
@@ -46,12 +108,15 @@ export type AppConfig = BaseConfig & DatabaseConfig & MessagingConfig & Internal
  *
  * @type {z.ZodType<AppConfig>}
  */
-export const appConfigSchema: z.ZodType<AppConfig> = z.object({
-  ...baseConfigShape,
-  ...databaseConfigShape,
-  ...messagingConfigShape,
-  ...internalTokenVerifierConfigShape,
-});
+export const appConfigSchema: z.ZodType<AppConfig> = z.intersection(
+  z.object({
+    ...baseConfigShape,
+    ...databaseConfigShape,
+    ...messagingConfigShape,
+    ...internalTokenVerifierConfigShape,
+  }),
+  optionalObjectStorage,
+);
 
 /**
  * Interface MigrationConfig
