@@ -32,6 +32,9 @@ export interface IntakeAttachmentTransaction {
     cleanupAfter: Date,
   ): Promise<void>;
 
+  /** Locks the tenant quota and reads ready and reserved bytes in this transaction. */
+  lockAndReadVerifiedBytes(): Promise<bigint>;
+
   /** Elects and pins an unfenced candidate, persisting verification and its outbox fact atomically. */
   electVerified(
     identity: IntakeAttachmentIdentity,

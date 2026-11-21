@@ -1,5 +1,7 @@
+import { CONFIG } from '@cadenway/nest-common';
 import type { FactoryProvider } from '@nestjs/common';
 
+import { freeStorageByteLimit, type AppConfig } from '../../../../../../config/app-config.js';
 import type { IntakeAttachmentObjectStore } from '../../../../application/ports/outbound/object-storage/intake-attachment/intake-attachment-object-store.port.js';
 import type { AttachmentRuntime } from '../../../../application/ports/outbound/runtime/attachment/attachment-runtime.port.js';
 import type { IntakeAttachmentUnitOfWork } from '../../../../application/ports/outbound/transactions/intake-attachment/intake-attachment-unit-of-work.port.js';
@@ -26,12 +28,24 @@ export const intakeAttachmentCommandProviders: readonly FactoryProvider[] = [
   },
   {
     provide: CompleteIntakeAttachmentUpload,
-    inject: [INTAKE_ATTACHMENT_UNIT_OF_WORK, ATTACHMENT_OBJECT_STORE, PostgresAttachmentRuntime],
+    inject: [
+      INTAKE_ATTACHMENT_UNIT_OF_WORK,
+      ATTACHMENT_OBJECT_STORE,
+      PostgresAttachmentRuntime,
+      CONFIG,
+    ],
     useFactory: (
       work: IntakeAttachmentUnitOfWork,
       objects: IntakeAttachmentObjectStore,
       runtime: AttachmentRuntime,
-    ): CompleteIntakeAttachmentUpload => new CompleteIntakeAttachmentUpload(work, objects, runtime),
+      config: AppConfig,
+    ): CompleteIntakeAttachmentUpload =>
+      new CompleteIntakeAttachmentUpload(
+        work,
+        objects,
+        runtime,
+        config.STORAGE_BYTE_QUOTA_ENABLED ? freeStorageByteLimit : null,
+      ),
   },
   {
     provide: ClaimIntakeAttachment,

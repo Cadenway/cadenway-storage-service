@@ -18,6 +18,8 @@ export async function answerAttachmentRefusals<T>(work: () => Promise<T>): Promi
           throw new ProblemException({ status: 404, code: 'attachment.not-found' });
         case 'upload-not-ready':
           throw new ProblemException({ status: 409, code: 'attachment.upload-not-ready' });
+        case 'storage-quota-exceeded':
+          throw new ProblemException({ status: 409, code: 'attachment.storage-quota-exceeded' });
         case 'version-mismatch':
           throw new ProblemException({ status: 412, code: 'request.version-mismatch' });
         case 'request-in-progress':

@@ -56,6 +56,9 @@ export interface AttachmentTransaction {
    */
   registerCandidate(attachmentId: string, candidateKey: string, cleanupAfter: Date): Promise<void>;
 
+  /** Locks the tenant quota and reads ready and reserved bytes in this transaction. */
+  lockAndReadVerifiedBytes(): Promise<bigint>;
+
   /** Elects a still-active candidate, persists ready metadata and protects the winner from cleanup. */
   electCandidate(attachment: Attachment, candidateKey: string): Promise<boolean>;
 

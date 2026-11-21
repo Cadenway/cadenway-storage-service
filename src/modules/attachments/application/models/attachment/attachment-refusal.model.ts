@@ -6,6 +6,7 @@ export class AttachmentRefusal extends Error {
     public readonly reason:
       | 'not-found'
       | 'upload-not-ready'
+      | 'storage-quota-exceeded'
       | 'version-mismatch'
       | 'request-in-progress'
       | 'idempotency-key-reused',

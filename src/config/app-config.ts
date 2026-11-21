@@ -113,7 +113,11 @@ export type AppConfig = BaseConfig &
   z.output<typeof optionalObjectStorage> & {
     readonly SEARCH_PROJECTION_CURSOR_SECRET?: string;
     readonly BILLING_PROJECTION_CURSOR_SECRET?: string;
+    readonly STORAGE_BYTE_QUOTA_ENABLED: boolean;
   };
+
+/** The Free plan's verified storage capacity in bytes. */
+export const freeStorageByteLimit = 2_000_000_000n;
 
 /**
  * Constant appConfigSchema
@@ -137,6 +141,10 @@ export const appConfigSchema: z.ZodType<AppConfig> = z
       BILLING_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS: z.string().trim().optional(),
       SEARCH_PROJECTION_CURSOR_SECRET: optionalProjectionCursorSecret,
       BILLING_PROJECTION_CURSOR_SECRET: optionalProjectionCursorSecret,
+      STORAGE_BYTE_QUOTA_ENABLED: z
+        .enum(['true', 'false'])
+        .default('false')
+        .transform((value) => value === 'true'),
     }),
     optionalObjectStorage,
   )

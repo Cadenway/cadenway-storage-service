@@ -62,6 +62,7 @@ describe('appConfigSchema', () => {
       NATS_URL: 'nats://localhost:4222',
       NATS_USER: 'storage',
       NATS_PASSWORD: 'storage',
+      STORAGE_BYTE_QUOTA_ENABLED: false,
       INTERNAL_TOKEN_AUDIENCE: 'storage-service',
       INTERNAL_TOKEN_TRUSTED_ISSUERS: {
         'api-gateway': [
