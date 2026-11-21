@@ -40,6 +40,7 @@ const verification = { sizeBytes: 20, contentType: 'image/png', verifiedContentT
 
 function fixture() {
   let transaction = false;
+  const committed = vi.fn();
   const store = {
     lock: vi.fn<IntakeAttachmentTransaction['lock']>().mockResolvedValue(reservation),
     beginSigning: vi.fn<IntakeAttachmentTransaction['beginSigning']>().mockResolvedValue({
@@ -56,6 +57,12 @@ function fixture() {
     registerCandidate: vi
       .fn<IntakeAttachmentTransaction['registerCandidate']>()
       .mockResolvedValue(undefined),
+    scheduleCandidateCleanup: vi
+      .fn<IntakeAttachmentTransaction['scheduleCandidateCleanup']>()
+      .mockImplementation(() => {
+        expect(transaction).toBe(true);
+        return Promise.resolve();
+      }),
     lockAndReadStorageAdmission: vi
       .fn<IntakeAttachmentTransaction['lockAndReadStorageAdmission']>()
       .mockResolvedValue({ usedBytes: 0n, limitBytes: 20n }),
@@ -68,7 +75,9 @@ function fixture() {
       expect(organizationId).toBe(scope.organizationId);
       transaction = true;
       try {
-        return await callback(store);
+        const result = await callback(store);
+        committed();
+        return result;
       } finally {
         transaction = false;
       }
@@ -97,7 +106,7 @@ function fixture() {
     now: vi.fn(() => now),
     newId: vi.fn().mockResolvedValue(stagingId),
   } satisfies AttachmentRuntime;
-  return { store, work, objects, runtime };
+  return { store, work, objects, runtime, committed };
 }
 
 describe('Anonymous intake attachment transactions', () => {
@@ -149,8 +158,10 @@ describe('Anonymous intake attachment transactions', () => {
     );
   });
 
-  it('refuses excess verified bytes without electing or publishing, then accepts the higher limit', async () => {
+  it('schedules cleanup for a copy refused by quota and accepts a retry after the ceiling increases', async () => {
     const f = fixture();
+    const retryCandidateId = '019a7006-7a8b-7c9d-8e0f-1a2b3c4d5e06';
+    f.runtime.newId.mockResolvedValueOnce(candidateId).mockResolvedValueOnce(retryCandidateId);
     f.store.lockAndReadStorageAdmission
       .mockResolvedValueOnce({ usedBytes: 1n, limitBytes: 20n })
       .mockResolvedValueOnce({ usedBytes: 1n, limitBytes: 21n });
@@ -160,8 +171,17 @@ describe('Anonymous intake attachment transactions', () => {
       reason: 'storage-quota-exceeded',
     });
     expect(f.store.electVerified).not.toHaveBeenCalled();
+    expect(f.store.scheduleCandidateCleanup).toHaveBeenCalledExactlyOnceWith(
+      scope,
+      `org/${scope.organizationId}/${candidateId}`,
+    );
+    expect(f.committed).toHaveBeenCalledTimes(2);
     await expect(operation.execute(scope)).resolves.toEqual({ id: scope.attachmentId });
     expect(f.store.electVerified).toHaveBeenCalledOnce();
+    expect(f.store.electVerified.mock.calls[0]?.[2]).toBe(
+      `org/${scope.organizationId}/${retryCandidateId}`,
+    );
+    expect(f.store.scheduleCandidateCleanup).toHaveBeenCalledOnce();
   });
 
   it('does not acquire the quota lock when enforcement is disabled', async () => {

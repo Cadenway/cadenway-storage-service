@@ -35,9 +35,13 @@ function fixture(
   initial = reservation(),
   clock = () => now,
   storageLimit: bigint | null = null,
+  newId = () => Promise.resolve(candidateId),
 ): {
   readonly useCase: CompleteAttachmentUpload;
   readonly registerCandidate: ReturnType<typeof vi.fn<AttachmentTransaction['registerCandidate']>>;
+  readonly scheduleCandidateCleanup: ReturnType<
+    typeof vi.fn<AttachmentTransaction['scheduleCandidateCleanup']>
+  >;
   readonly lockAndReadStorageAdmission: ReturnType<
     typeof vi.fn<AttachmentTransaction['lockAndReadStorageAdmission']>
   >;
@@ -47,10 +51,12 @@ function fixture(
   readonly lockTask: ReturnType<typeof vi.fn<AttachmentTransaction['lockTask']>>;
   readonly registerTaskPurge: ReturnType<typeof vi.fn<AttachmentTransaction['registerTaskPurge']>>;
   readonly work: AttachmentUnitOfWork;
+  readonly committed: ReturnType<typeof vi.fn>;
   readonly copy: ReturnType<typeof vi.fn<AttachmentObjectStore['copyAndVerify']>>;
 } {
   let attachment = initial;
   const registerCandidate = vi.fn<AttachmentTransaction['registerCandidate']>();
+  const scheduleCandidateCleanup = vi.fn<AttachmentTransaction['scheduleCandidateCleanup']>();
   const electCandidate = vi.fn<AttachmentTransaction['electCandidate']>((ready) => {
     attachment = ready;
     return Promise.resolve(true);
@@ -73,6 +79,7 @@ function fixture(
     completeUploadClaim: vi.fn(),
     releaseUploadClaim: vi.fn(),
     registerCandidate,
+    scheduleCandidateCleanup,
     lockAndReadStorageAdmission,
     lockAndReadStorageEntitlement: vi.fn(),
     saveStorageEntitlement: vi.fn(),
@@ -80,8 +87,13 @@ function fixture(
     deleteAttachment: vi.fn(),
     appendFact,
   };
+  const committed = vi.fn();
   const work: AttachmentUnitOfWork = {
-    run: async (_organizationId, operation) => operation(store),
+    run: async (_organizationId, operation) => {
+      const result = await operation(store);
+      committed();
+      return result;
+    },
   };
   const copy = vi.fn<AttachmentObjectStore['copyAndVerify']>(() =>
     Promise.resolve({
@@ -97,6 +109,7 @@ function fixture(
   };
   return {
     registerCandidate,
+    scheduleCandidateCleanup,
     lockAndReadStorageAdmission,
     electCandidate,
     appendFact,
@@ -104,11 +117,12 @@ function fixture(
     lockTask,
     registerTaskPurge,
     work,
+    committed,
     copy,
     useCase: new CompleteAttachmentUpload(
       work,
       objects,
-      { now: clock, newId: () => Promise.resolve(candidateId) },
+      { now: clock, newId },
       storageLimit !== null,
     ),
   };
@@ -139,12 +153,20 @@ describe('CompleteAttachmentUpload', () => {
     expect(appendFact).toHaveBeenCalledTimes(1);
   });
 
-  it('refuses verified bytes over quota and accepts a retry after the ceiling increases', async () => {
-    const { useCase, lockAndReadStorageAdmission, electCandidate, appendFact } = fixture(
-      reservation(),
-      () => now,
-      20n,
-    );
+  it('schedules cleanup for a copy refused by quota and accepts a retry after the ceiling increases', async () => {
+    const retryCandidateId = '019a7004-3b2c-7d4e-8f5a-6b7c8d9e0f18';
+    const newId = vi
+      .fn<() => Promise<string>>()
+      .mockResolvedValueOnce(candidateId)
+      .mockResolvedValueOnce(retryCandidateId);
+    const {
+      useCase,
+      lockAndReadStorageAdmission,
+      scheduleCandidateCleanup,
+      electCandidate,
+      appendFact,
+      committed,
+    } = fixture(reservation(), () => now, 20n, newId);
     lockAndReadStorageAdmission
       .mockResolvedValueOnce({ usedBytes: 1n, limitBytes: 20n })
       .mockResolvedValueOnce({ usedBytes: 1n, limitBytes: 21n });
@@ -153,10 +175,22 @@ describe('CompleteAttachmentUpload', () => {
     });
     expect(electCandidate).not.toHaveBeenCalled();
     expect(appendFact).not.toHaveBeenCalled();
+    expect(scheduleCandidateCleanup).toHaveBeenCalledExactlyOnceWith(
+      attachmentId,
+      `org/${organizationId}/${candidateId}`,
+    );
+    expect(committed).toHaveBeenCalledTimes(2);
+    expect(scheduleCandidateCleanup.mock.invocationCallOrder[0]).toBeLessThan(
+      committed.mock.invocationCallOrder[1] ?? 0,
+    );
     await expect(useCase.execute(input)).resolves.toMatchObject({
       attachment: { id: attachmentId },
     });
-    expect(electCandidate).toHaveBeenCalledOnce();
+    expect(electCandidate).toHaveBeenCalledExactlyOnceWith(
+      expect.any(Attachment) as unknown,
+      `org/${organizationId}/${retryCandidateId}`,
+    );
+    expect(scheduleCandidateCleanup).toHaveBeenCalledOnce();
     expect(appendFact).toHaveBeenCalledOnce();
   });
 
