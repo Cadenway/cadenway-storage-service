@@ -38,8 +38,8 @@ function fixture(
 ): {
   readonly useCase: CompleteAttachmentUpload;
   readonly registerCandidate: ReturnType<typeof vi.fn<AttachmentTransaction['registerCandidate']>>;
-  readonly lockAndReadVerifiedBytes: ReturnType<
-    typeof vi.fn<AttachmentTransaction['lockAndReadVerifiedBytes']>
+  readonly lockAndReadStorageAdmission: ReturnType<
+    typeof vi.fn<AttachmentTransaction['lockAndReadStorageAdmission']>
   >;
   readonly electCandidate: ReturnType<typeof vi.fn<AttachmentTransaction['electCandidate']>>;
   readonly appendFact: ReturnType<typeof vi.fn<AttachmentTransaction['appendFact']>>;
@@ -56,9 +56,9 @@ function fixture(
     return Promise.resolve(true);
   });
   const appendFact = vi.fn<AttachmentTransaction['appendFact']>();
-  const lockAndReadVerifiedBytes = vi
-    .fn<AttachmentTransaction['lockAndReadVerifiedBytes']>()
-    .mockResolvedValue(0n);
+  const lockAndReadStorageAdmission = vi
+    .fn<AttachmentTransaction['lockAndReadStorageAdmission']>()
+    .mockResolvedValue({ usedBytes: 0n, limitBytes: storageLimit ?? 2_000_000_000n });
   const registerTaskPurge = vi.fn<AttachmentTransaction['registerTaskPurge']>();
   const lockAttachment = vi.fn<AttachmentTransaction['lockAttachment']>(() =>
     Promise.resolve(attachment),
@@ -73,7 +73,9 @@ function fixture(
     completeUploadClaim: vi.fn(),
     releaseUploadClaim: vi.fn(),
     registerCandidate,
-    lockAndReadVerifiedBytes,
+    lockAndReadStorageAdmission,
+    lockAndReadStorageEntitlement: vi.fn(),
+    saveStorageEntitlement: vi.fn(),
     electCandidate,
     deleteAttachment: vi.fn(),
     appendFact,
@@ -95,7 +97,7 @@ function fixture(
   };
   return {
     registerCandidate,
-    lockAndReadVerifiedBytes,
+    lockAndReadStorageAdmission,
     electCandidate,
     appendFact,
     lockAttachment,
@@ -107,7 +109,7 @@ function fixture(
       work,
       objects,
       { now: clock, newId: () => Promise.resolve(candidateId) },
-      storageLimit,
+      storageLimit !== null,
     ),
   };
 }
@@ -119,7 +121,7 @@ describe('CompleteAttachmentUpload', () => {
     const {
       useCase,
       registerCandidate,
-      lockAndReadVerifiedBytes,
+      lockAndReadStorageAdmission,
       electCandidate,
       appendFact,
       copy,
@@ -133,17 +135,19 @@ describe('CompleteAttachmentUpload', () => {
       copy.mock.invocationCallOrder[0] ?? 0,
     );
     expect(electCandidate).toHaveBeenCalledTimes(1);
-    expect(lockAndReadVerifiedBytes).toHaveBeenCalledOnce();
+    expect(lockAndReadStorageAdmission).toHaveBeenCalledOnce();
     expect(appendFact).toHaveBeenCalledTimes(1);
   });
 
-  it('refuses verified bytes over quota before election and leaves the upload retryable', async () => {
-    const { useCase, lockAndReadVerifiedBytes, electCandidate, appendFact } = fixture(
+  it('refuses verified bytes over quota and accepts a retry after the ceiling increases', async () => {
+    const { useCase, lockAndReadStorageAdmission, electCandidate, appendFact } = fixture(
       reservation(),
       () => now,
       20n,
     );
-    lockAndReadVerifiedBytes.mockResolvedValueOnce(1n).mockResolvedValueOnce(0n);
+    lockAndReadStorageAdmission
+      .mockResolvedValueOnce({ usedBytes: 1n, limitBytes: 20n })
+      .mockResolvedValueOnce({ usedBytes: 1n, limitBytes: 21n });
     await expect(useCase.execute(input)).rejects.toMatchObject({
       reason: 'storage-quota-exceeded',
     });
@@ -157,11 +161,11 @@ describe('CompleteAttachmentUpload', () => {
   });
 
   it('does not acquire the quota lock when enforcement is disabled', async () => {
-    const { useCase, lockAndReadVerifiedBytes } = fixture();
+    const { useCase, lockAndReadStorageAdmission } = fixture();
     await expect(useCase.execute(input)).resolves.toMatchObject({
       attachment: { id: attachmentId },
     });
-    expect(lockAndReadVerifiedBytes).not.toHaveBeenCalled();
+    expect(lockAndReadStorageAdmission).not.toHaveBeenCalled();
   });
 
   it('rejects metadata that does not describe the copied candidate without electing or publishing', async () => {

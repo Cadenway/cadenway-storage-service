@@ -2,6 +2,7 @@ import type { Attachment } from '../../../domain/aggregates/attachment/attachmen
 import type { IntakeAttachment } from '../../../domain/aggregates/intake-attachment/intake-attachment.aggregate.js';
 import type { AttachmentFact } from '../../../domain/events/attachment/attachment-fact.event.js';
 import type { IntakeAttachmentVerified } from '../../../domain/events/intake-attachment/intake-attachment-verified.event.js';
+import type { StorageQuotaAdmission } from '../attachment/storage-quota-admission.model.js';
 import type { UploadCapability } from '../attachment/upload-capability.model.js';
 import type { IntakeAttachmentIdentity } from './intake-attachment-identity.model.js';
 import type { IntakeSigningClaim } from './intake-signing-claim.model.js';
@@ -32,8 +33,8 @@ export interface IntakeAttachmentTransaction {
     cleanupAfter: Date,
   ): Promise<void>;
 
-  /** Locks the tenant quota and reads ready and reserved bytes in this transaction. */
-  lockAndReadVerifiedBytes(): Promise<bigint>;
+  /** Locks the tenant quota and reads ready bytes, reserved bytes and the effective limit. */
+  lockAndReadStorageAdmission(): Promise<StorageQuotaAdmission>;
 
   /** Elects and pins an unfenced candidate, persisting verification and its outbox fact atomically. */
   electVerified(

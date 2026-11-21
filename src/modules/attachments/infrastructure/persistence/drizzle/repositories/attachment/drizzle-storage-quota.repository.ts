@@ -1,13 +1,17 @@
 import type { TransactionScope } from '@cadenway/nest-common/database';
-import { sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 
+import type { StorageQuotaAdmission } from '../../../../../application/models/attachment/storage-quota-admission.model.js';
+import { freeStorageEntitlement } from '../../../../../domain/policies/attachment/storage-entitlement.policy.js';
+import type { StorageEntitlement } from '../../../../../domain/value-objects/attachment/storage-entitlement.value-object.js';
 import { attachments } from '../../schemas/attachment/attachments.schema.js';
 import { intakeAttachments } from '../../schemas/attachment/intake-attachments.schema.js';
+import { storageByteEntitlements } from '../../schemas/attachment/storage-byte-entitlements.schema.js';
 
-/** Serializes verified byte admissions and measures one tenant in the caller's transaction. */
+/** Serializes byte admissions and Billing entitlement changes in the tenant transaction. */
 export class DrizzleStorageQuota {
   // #region Properties
-  /** Protects callers from measuring before the transaction-wide advisory lock is held. */
+  /** Protects admission and projection operations before the advisory lock is held. */
   private locked = false;
   // #endregion
 
@@ -23,14 +27,20 @@ export class DrizzleStorageQuota {
   /** Takes a tenant-specific transaction lock before a fresh READ COMMITTED statement. */
   public async lock(): Promise<void> {
     const key = `storage-quota:${this.organizationId}`;
-    await this.scope.db.execute(sql`select pg_advisory_xact_lock(hashtextextended(${key}, 0))`);
+    const result = await this.scope.db.execute<{ isolation: string }>(sql`
+      select pg_advisory_xact_lock(hashtextextended(${key}, 0)),
+             current_setting('transaction_isolation') as isolation
+    `);
+    if (result.rows[0]?.isolation !== 'read committed') {
+      throw new Error('Storage quota admission requires a read committed transaction.');
+    }
     this.locked = true;
   }
 
-  /** Includes ready files and verified Intake reservations in the same SQL snapshot. */
-  public async usedBytes(): Promise<bigint> {
-    if (!this.locked) throw new Error('Storage quota must be locked before measuring usage.');
-    const result = await this.scope.db.execute<{ used_bytes: string; isolation: string }>(sql`
+  /** Reads the effective limit, ready files and verified Intake reservations in one snapshot. */
+  public async admission(): Promise<StorageQuotaAdmission> {
+    this.requireLock();
+    const result = await this.scope.db.execute<{ used_bytes: string; limit_bytes: string }>(sql`
       select (
         coalesce((
           select sum(${attachments.sizeBytes}::numeric)
@@ -45,17 +55,48 @@ export class DrizzleStorageQuota {
             and ${intakeAttachments.status} = 'verified'
         ), 0)
       )::text as used_bytes,
-      current_setting('transaction_isolation') as isolation
+      coalesce((
+        select ${storageByteEntitlements.limitBytes}
+        from ${storageByteEntitlements}
+        where ${storageByteEntitlements.organizationId} = ${this.organizationId}
+      ), ${freeStorageEntitlement.limitBytes}::bigint)::text as limit_bytes
     `);
     const row = result.rows[0];
-    if (row?.isolation !== 'read committed') {
-      throw new Error('Storage quota admission requires a read committed transaction.');
-    }
-    const value = row.used_bytes;
-    if (!/^\d+$/u.test(value)) {
+    if (row === undefined || !/^\d+$/u.test(row.used_bytes) || !/^\d+$/u.test(row.limit_bytes)) {
       throw new Error('Storage quota usage could not be measured.');
     }
-    return BigInt(value);
+    return { usedBytes: BigInt(row.used_bytes), limitBytes: BigInt(row.limit_bytes) };
+  }
+
+  /** Reads the latest committed Billing version after acquiring the tenant lock. */
+  public async entitlement(): Promise<StorageEntitlement> {
+    this.requireLock();
+    const [row] = await this.scope.db
+      .select({
+        version: storageByteEntitlements.version,
+        limitBytes: storageByteEntitlements.limitBytes,
+      })
+      .from(storageByteEntitlements)
+      .where(eq(storageByteEntitlements.organizationId, this.organizationId));
+    return row ?? freeStorageEntitlement;
+  }
+
+  /** Persists the accepted version and limit in the same transaction as the locked read. */
+  public async saveEntitlement(entitlement: StorageEntitlement): Promise<void> {
+    this.requireLock();
+    const { version, limitBytes } = entitlement;
+    await this.scope.db
+      .insert(storageByteEntitlements)
+      .values({ organizationId: this.organizationId, version, limitBytes })
+      .onConflictDoUpdate({
+        target: storageByteEntitlements.organizationId,
+        set: { version, limitBytes },
+      });
+  }
+
+  private requireLock(): void {
+    if (!this.locked)
+      throw new Error('Storage quota must be locked before inspecting or changing it.');
   }
   // #endregion
 }

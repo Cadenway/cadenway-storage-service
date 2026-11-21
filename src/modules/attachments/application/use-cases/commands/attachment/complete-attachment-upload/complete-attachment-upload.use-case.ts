@@ -16,7 +16,7 @@ export class CompleteAttachmentUpload {
     private readonly work: AttachmentUnitOfWork,
     private readonly objects: AttachmentObjectStore,
     private readonly runtime: AttachmentRuntime,
-    private readonly storageLimit: bigint | null = null,
+    private readonly storageQuotaEnabled = false,
   ) {}
   // #endregion
 
@@ -59,12 +59,11 @@ export class CompleteAttachmentUpload {
       if (verification === null) throw new AttachmentRefusal('upload-not-ready');
       const change = attachment.finalize(verification, now);
       if (change.event !== null) {
-        if (
-          this.storageLimit !== null &&
-          (await store.lockAndReadVerifiedBytes()) + BigInt(verification.sizeBytes) >
-            this.storageLimit
-        ) {
-          throw new AttachmentRefusal('storage-quota-exceeded');
+        if (this.storageQuotaEnabled) {
+          const { usedBytes, limitBytes } = await store.lockAndReadStorageAdmission();
+          if (usedBytes + BigInt(verification.sizeBytes) > limitBytes) {
+            throw new AttachmentRefusal('storage-quota-exceeded');
+          }
         }
         if (!(await store.electCandidate(change.attachment, candidateKey))) {
           throw new AttachmentRefusal('upload-not-ready');

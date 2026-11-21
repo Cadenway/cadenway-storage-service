@@ -113,6 +113,7 @@ const attachmentTables = [
   'intake_attachment_candidates',
   'intake_attachment_upload_claims',
   'intake_attachments',
+  'storage_byte_entitlements',
 ] as const;
 
 const profileTables = [
@@ -382,7 +383,7 @@ describe('storage-service wiring', () => {
         tableowner: 'storage_migrator',
       })),
     );
-    expect(journal.rows).toEqual([{ applied: 4 }]);
+    expect(journal.rows).toEqual([{ applied: 5 }]);
   });
 
   it('applies nothing when the migrator runs again', async () => {
@@ -391,7 +392,7 @@ describe('storage-service wiring', () => {
     const journal = await migrator.query<{ applied: number }>(
       'select count(*)::int as applied from drizzle.__drizzle_migrations',
     );
-    expect(journal.rows).toEqual([{ applied: 4 }]);
+    expect(journal.rows).toEqual([{ applied: 5 }]);
   });
 
   it('provisions all scheduled cleanup queues with the migrator', async () => {
@@ -616,7 +617,7 @@ describe('storage-service wiring', () => {
       await scope.client.query('delete from profile_media_owners where owner_id = $1', [owner.id]);
     });
   });
-  it('isolates attachment metadata, candidates, purge records and upload claims by organization', async () => {
+  it('isolates attachment metadata, candidates, purge records, upload claims and byte entitlements by organization', async () => {
     const tenant = service().get(TenantTransactionRunner);
     const attachmentId = randomUUID();
     const objectKey = `org/${atelierNordId}/${attachmentId}`;
@@ -671,6 +672,11 @@ describe('storage-service wiring', () => {
           (organization_id, publication_id, attachment_id, fingerprint, expires_at)
           values ($1, $2, $3, 'test-fingerprint', now() + interval '1 day')`,
         values: [atelierNordId, publicationId, attachmentId],
+      },
+      {
+        sql: `insert into storage_byte_entitlements (organization_id, version, limit_bytes)
+          values ($1, 1, 3000000000)`,
+        values: [atelierNordId],
       },
     ];
 
@@ -2148,7 +2154,7 @@ describe('storage-service wiring', () => {
     const journal = await migrator.query<{ applied: number }>(
       'select count(*)::int as applied from drizzle.__drizzle_migrations',
     );
-    expect(journal.rows).toEqual([{ applied: 4 }]);
+    expect(journal.rows).toEqual([{ applied: 5 }]);
   });
 
   it('runs the outbox relay and marks an acknowledged event as sent', async () => {

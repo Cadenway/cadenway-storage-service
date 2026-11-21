@@ -24,6 +24,7 @@ and OVH Object Storage stores bytes in production.
 | `intake_attachments`                | Anonymous reservations and immutable Task decisions              |
 | `intake_attachment_candidates`      | Opaque staging and immutable candidates awaiting decisions       |
 | `intake_attachment_upload_claims`   | Active signing lease and encrypted response for intake replay    |
+| `storage_byte_entitlements`         | Latest Billing version and effective byte ceiling per tenant     |
 
 The attachment tables use forced organization isolation. The reconciliation cursor uses a forced
 system-only policy.
@@ -38,16 +39,16 @@ whose task Storage has not fenced for permanent purge. Task owns the current vis
 decision. Resolution returns the retained terminal version of a deleted attachment.
 
 The signed Billing system identity can page `GET /internal/v1/billing-attachment-usage`.
-
-With Free byte admission enabled, authenticated finalization and Intake verification add the
-actual verified bytes under the same tenant transaction lock. The quota counts ready files and
-verified Intake reservations, with a total limit of 2,000,000,000 bytes. A claim transfers its
-reservation to a ready file atomically. A verified reservation lasts until the authoritative
-claim or release. Rejected completion returns `409 attachment.storage-quota-exceeded` without
-plan, limit or usage details.
 It uses the signed organization and a separate cursor scope. Each returned row carries the
 verified ready bytes or a retained terminal version. A task purge changes measured usage when
 Storage commits the attachment deletion. The endpoint and its refusals are private and uncacheable.
+
+With byte admission enabled, authenticated finalization and Intake verification add the actual
+verified bytes under the same tenant transaction lock. The quota counts ready files and verified
+Intake reservations. A tenant starts at the Free baseline of 2,000,000,000 bytes and uses its
+latest accepted Billing projection when present. A claim transfers its reservation to a ready
+file atomically. A verified reservation lasts until the authoritative claim or release. Rejected
+completion returns the opaque `409 attachment.storage-quota-exceeded` problem.
 
 The P4 routes are defined in `openapi/internal/storage-service.yaml`.
 
@@ -140,6 +141,12 @@ The Billing usage reader uses a tenant snapshot and a fixed upper attachment ID.
 verified size of a ready attachment and the terminal version of a previously ready attachment.
 A task purge leaves the attachment in measured usage until Storage commits its deletion.
 
+Byte admission and the internal `ApplyStorageEntitlement` command share the tenant storage quota
+lock under `READ COMMITTED`. Admissions read usage and the effective limit in a single statement
+after the lock. Billing entitlement versions only advance with an equal or higher limit. A replay
+of the current version and limit succeeds without a write. An older version, conflicting replay
+or lower limit leaves the current projection in effect.
+
 Each lifecycle write owns its organization transaction. Finalization, deletion or purge cleanup
 commits the metadata change, the outbox fact when applicable and any pending cleanup work together.
 Calls to object storage run outside database transactions. Finalization rechecks the reservation
@@ -166,3 +173,5 @@ needs to allow listing both prefixes when intake uploads are enabled.
   object cleanup after that expiry even if finalization has succeeded.
 - Validate the object storage settings together at startup. In a local mode with all storage
   settings absent, starts, downloads and verification report object storage unavailable.
+- The entitlement table is additive. Older application versions continue to enforce their
+  Free ceiling while the projection remains available for the next deployment.

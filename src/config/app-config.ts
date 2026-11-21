@@ -116,9 +116,6 @@ export type AppConfig = BaseConfig &
     readonly STORAGE_BYTE_QUOTA_ENABLED: boolean;
   };
 
-/** The Free plan's verified storage capacity in bytes. */
-export const freeStorageByteLimit = 2_000_000_000n;
-
 /**
  * Constant appConfigSchema
  *
