@@ -97,6 +97,7 @@ a task nor adds bytes to the ready file count.
   of pending and ready attachments in that organization. Duplicate delivery has a single effect.
 - `intake.attachment-claimed.v1` and `intake.attachment-released.v1` record the authoritative Task
   decisions, including decisions that arrive before the reservation is seen locally.
+- `subscription.changed.v1` applies the Billing snapshot to the tenant's byte entitlement.
 
 The broker's Task publisher permission authorizes the subject. The envelope actor identifies the
 cause of the purge and is carried forward to the resulting deletion facts. The durable
@@ -111,6 +112,14 @@ The separate `storage-service__claim-intake-attachment` and
 actor in the delivery deduplication transaction. A claim binds an elected copy only if the task
 purge fence permits it. A ready anonymous attachment has a null account author and the Storage
 system actor on its `file.uploaded.v1` fact. A release suppresses a later start or verification.
+
+The broker grants publication of `evt.subscription.changed.v1` to Billing. The
+`storage-service__apply-storage-byte-entitlement` durable checks the Billing system actor and the
+delivery tenant, replays retained snapshots, and commits the processed ID and entitlement within
+one tenant transaction. Older snapshots and exact replays are acknowledged. Conflicting,
+decreasing or invalid snapshots follow the kit's retry and dead-letter policy. Enable
+`STORAGE_BILLING_ENTITLEMENTS_ENABLED` after the broker permissions are deployed. Snapshot
+consumption can start before enabling `STORAGE_BYTE_QUOTA_ENABLED`.
 
 ## Invariants
 

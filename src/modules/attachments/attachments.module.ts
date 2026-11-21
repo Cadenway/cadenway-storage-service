@@ -13,6 +13,7 @@ import { purgeUploadReceiptsHandlerProvider } from './composition/providers/adap
 import { reconcileAttachmentObjectsHandlerProvider } from './composition/providers/adapters/attachment/reconcile-attachment-objects-handler.provider.js';
 import { sweepAttachmentCleanupHandlerProvider } from './composition/providers/adapters/attachment/sweep-attachment-cleanup-handler.provider.js';
 import { taskPurgedHandlerProvider } from './composition/providers/adapters/attachment/task-purged-handler.provider.js';
+import { billingSubscriptionChangedHandlerProvider } from './composition/providers/adapters/billing/billing-subscription-changed-handler.provider.js';
 import { intakeAttachmentDecisionsHandlerProvider } from './composition/providers/adapters/intake-attachment/intake-attachment-decisions-handler.provider.js';
 import { intakeAttachmentUnitOfWorkProvider } from './composition/providers/adapters/intake-attachment/intake-attachment-unit-of-work.provider.js';
 import { attachmentCommandProviders } from './composition/providers/use-cases/attachment/attachment-command.provider.js';
@@ -54,6 +55,7 @@ import { AttachmentSearchProjectionsController } from './presentation/http/contr
     sweepAttachmentCleanupHandlerProvider(SWEEP_ATTACHMENT_CLEANUP_QUEUE),
     taskPurgedHandlerProvider,
     intakeAttachmentDecisionsHandlerProvider,
+    billingSubscriptionChangedHandlerProvider,
   ],
 })
 export class AttachmentsModule implements NestModule {

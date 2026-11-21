@@ -15,6 +15,7 @@
 # owns, uses the JetStream API of a consumer of EVENTS, and subscribes to its own inbox prefix
 # `_INBOX.storage.>` and to `rebuild.storage.>` only. When cadenway-ops changes those permissions,
 # change them here too. `admin` stands for the user of the `nats-streams` container of cadenway-ops.
+# The local `billing` fixture can publish only `evt.subscription.changed.v1`.
 #
 # The streams: `nats-streams` runs compose/nats/ensure-streams.sh of cadenway-ops, copied below, as
 # `admin`, the way the `nats-streams` container of cadenway-ops does. It creates EVENTS,
@@ -121,6 +122,15 @@ configs:
           { user: admin, password: admin, permissions: { publish: ">", subscribe: ">" } }
 
           {
+            user: billing
+            password: billing
+            permissions: {
+              publish: { allow: ["evt.subscription.changed.v1"] }
+              subscribe: { allow: ["_INBOX.billing.>"] }
+            }
+          }
+
+          {
             user: storage
             password: storage
             permissions: {
@@ -134,6 +144,10 @@ configs:
                   "$$JS.API.CONSUMER.INFO.EVENTS.storage-service__record-task-purge",
                   "$$JS.API.CONSUMER.MSG.NEXT.EVENTS.storage-service__record-task-purge",
                   "$$JS.ACK.EVENTS.storage-service__record-task-purge.>",
+                  "$$JS.API.CONSUMER.CREATE.EVENTS.storage-service__apply-storage-byte-entitlement.evt.subscription.changed.v1",
+                  "$$JS.API.CONSUMER.INFO.EVENTS.storage-service__apply-storage-byte-entitlement",
+                  "$$JS.API.CONSUMER.MSG.NEXT.EVENTS.storage-service__apply-storage-byte-entitlement",
+                  "$$JS.ACK.EVENTS.storage-service__apply-storage-byte-entitlement.>",
                   "$$JS.API.CONSUMER.CREATE.EVENTS.storage-service__claim-intake-attachment.evt.intake.attachment-claimed.v1",
                   "$$JS.API.CONSUMER.INFO.EVENTS.storage-service__claim-intake-attachment",
                   "$$JS.API.CONSUMER.MSG.NEXT.EVENTS.storage-service__claim-intake-attachment",
