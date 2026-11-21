@@ -19,23 +19,48 @@ import { addAbortSignal, Readable } from 'node:stream';
 
 import type { AttachmentObjectPage } from '../../../application/models/attachment/attachment-object-page.model.js';
 import type { UploadCapability } from '../../../application/models/attachment/upload-capability.model.js';
+import type { IntakeAttachmentObjectPage } from '../../../application/models/intake-attachment/intake-attachment-object-page.model.js';
 import type { AttachmentObjectInventory } from '../../../application/ports/outbound/object-storage/attachment/attachment-object-inventory.port.js';
-import type { AttachmentObjectStore } from '../../../application/ports/outbound/object-storage/attachment/attachment-object-store.port.js';
+import {
+  AttachmentObjectStorageError,
+  type AttachmentObjectStore,
+} from '../../../application/ports/outbound/object-storage/attachment/attachment-object-store.port.js';
+import type { IntakeAttachmentObjectEraser } from '../../../application/ports/outbound/object-storage/intake-attachment/intake-attachment-object-eraser.port.js';
+import type { IntakeAttachmentObjectInventory } from '../../../application/ports/outbound/object-storage/intake-attachment/intake-attachment-object-inventory.port.js';
+import type { IntakeAttachmentObjectStore } from '../../../application/ports/outbound/object-storage/intake-attachment/intake-attachment-object-store.port.js';
 import { MAX_ATTACHMENT_SIZE_BYTES } from '../../../domain/aggregates/attachment/attachment.aggregate.js';
 import type { AttachmentVerification } from '../../../domain/value-objects/attachment/attachment-verification.value-object.js';
 import { registeredMediaTypeForExtension } from '../media-types/registered-attachment-media-type.adapter.js';
-import { AttachmentObjectStorageError } from '../../../application/ports/outbound/object-storage/attachment/attachment-object-store.port.js';
 
 const CAPABILITY_SECONDS = 5 * 60;
 const VERIFICATION_BYTES = 4 * 1024;
 const STORAGE_DEADLINE_MS = 10_000;
 const ATTACHMENT_OBJECT_PAGE_SIZE = 500;
 const MAX_CONTINUATION_LENGTH = 8_192;
+const ORGANIZATION_ID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u;
 const ORGANIZATION_OBJECT_KEY =
   /^org\/(?<organizationId>[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\/[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const INTAKE_STAGING_KEY =
+  /^intake\/[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
 function requireObjectKey(key: string): void {
   if (!ORGANIZATION_OBJECT_KEY.test(key)) throw new AttachmentObjectStorageError();
+}
+
+function checkedOrganization(organizationId: string): string {
+  const id = organizationId.toLowerCase();
+  if (!ORGANIZATION_ID.test(id)) throw new AttachmentObjectStorageError();
+  return id;
+}
+
+function requireIntakeStagingKey(key: string): void {
+  if (!INTAKE_STAGING_KEY.test(key)) throw new AttachmentObjectStorageError();
+}
+
+function requireTenantObjectKey(key: string, organizationId: string): void {
+  if (ORGANIZATION_OBJECT_KEY.exec(key)?.groups?.organizationId !== organizationId) {
+    throw new AttachmentObjectStorageError();
+  }
 }
 
 function organizationPrefix(key: string): string {
@@ -148,7 +173,14 @@ async function detectContentType(
 }
 
 /** Signs browser transfers and verifies server-side copies with one S3-compatible bucket. */
-export class S3AttachmentObjectStore implements AttachmentObjectStore, AttachmentObjectInventory {
+export class S3AttachmentObjectStore
+  implements
+    AttachmentObjectStore,
+    AttachmentObjectInventory,
+    IntakeAttachmentObjectStore,
+    IntakeAttachmentObjectEraser,
+    IntakeAttachmentObjectInventory
+{
   // #region Properties
   /** Client for operations on the internal storage endpoint. */
   private readonly storage: S3Client;
@@ -182,11 +214,36 @@ export class S3AttachmentObjectStore implements AttachmentObjectStore, Attachmen
     continuation: string | null,
     signal: AbortSignal,
   ): Promise<AttachmentObjectPage> {
+    const { keys, next } = await this.listObjectPage('org/', continuation, signal);
+    const objects = keys.flatMap((objectKey) => {
+      const organizationId = ORGANIZATION_OBJECT_KEY.exec(objectKey)?.groups?.organizationId;
+      return organizationId === undefined ? [] : [{ organizationId, objectKey }];
+    });
+    return { objects, next };
+  }
+
+  /** Lists opaque staging keys for reconciliation against the persisted intake reservations. */
+  public async listIntakeObjects(
+    continuation: string | null,
+    signal: AbortSignal,
+  ): Promise<IntakeAttachmentObjectPage> {
+    const { keys, next } = await this.listObjectPage('intake/', continuation, signal);
+    const objects = keys
+      .filter((key) => INTAKE_STAGING_KEY.test(key))
+      .map((objectKey) => ({ objectKey }));
+    return { objects, next };
+  }
+
+  private async listObjectPage(
+    prefix: 'org/' | 'intake/',
+    continuation: string | null,
+    signal: AbortSignal,
+  ): Promise<{ readonly keys: readonly string[]; readonly next: string | null }> {
     signal.throwIfAborted();
     try {
       const request = new ListObjectsV2Command({
         Bucket: this.bucket,
-        Prefix: 'org/',
+        Prefix: prefix,
         MaxKeys: ATTACHMENT_OBJECT_PAGE_SIZE,
         ContinuationToken: continuation ?? undefined,
       });
@@ -207,12 +264,8 @@ export class S3AttachmentObjectStore implements AttachmentObjectStore, Attachmen
       ) {
         throw new AttachmentObjectStorageError();
       }
-      const objects = entries.flatMap(({ Key: objectKey }) => {
-        if (typeof objectKey !== 'string') return [];
-        const organizationId = ORGANIZATION_OBJECT_KEY.exec(objectKey)?.groups?.organizationId;
-        return organizationId === undefined ? [] : [{ organizationId, objectKey }];
-      });
-      return { objects, next };
+      const keys = entries.flatMap(({ Key }) => (typeof Key === 'string' ? [Key] : []));
+      return { keys, next };
     } catch {
       signal.throwIfAborted();
       throw new AttachmentObjectStorageError();
@@ -224,6 +277,21 @@ export class S3AttachmentObjectStore implements AttachmentObjectStore, Attachmen
     input: Parameters<AttachmentObjectStore['signUpload']>[0],
   ): Promise<UploadCapability> {
     requireObjectKey(input.stagingKey);
+    return this.signStagingUpload(input);
+  }
+
+  /** Signs a staging key read from the checked tenant's durable intake reservation. */
+  public async signIntakeUpload(
+    input: Parameters<IntakeAttachmentObjectStore['signIntakeUpload']>[0],
+  ): Promise<UploadCapability> {
+    checkedOrganization(input.organizationId);
+    requireIntakeStagingKey(input.stagingKey);
+    return this.signStagingUpload(input);
+  }
+
+  private async signStagingUpload(
+    input: Parameters<AttachmentObjectStore['signUpload']>[0],
+  ): Promise<UploadCapability> {
     const limit = input.expiresAt.getTime();
     const seconds = Math.min(CAPABILITY_SECONDS, Math.floor((limit - Date.now()) / 1_000));
     if (!Number.isFinite(seconds) || seconds < 1) throw new AttachmentObjectStorageError();
@@ -260,6 +328,24 @@ export class S3AttachmentObjectStore implements AttachmentObjectStore, Attachmen
     ) {
       throw new AttachmentObjectStorageError();
     }
+    return this.copyStagingAndVerify(stagingKey, candidateKey);
+  }
+
+  /** Copies the bound opaque staging key to an immutable candidate under the explicit tenant. */
+  public async copyAndVerifyIntake(
+    input: Parameters<IntakeAttachmentObjectStore['copyAndVerifyIntake']>[0],
+  ): Promise<AttachmentVerification | null> {
+    const { stagingKey, candidateKey } = input;
+    const organizationId = checkedOrganization(input.organizationId);
+    requireIntakeStagingKey(stagingKey);
+    requireTenantObjectKey(candidateKey, organizationId);
+    return this.copyStagingAndVerify(stagingKey, candidateKey);
+  }
+
+  private async copyStagingAndVerify(
+    stagingKey: string,
+    candidateKey: string,
+  ): Promise<AttachmentVerification | null> {
     const options = { abortSignal: AbortSignal.timeout(STORAGE_DEADLINE_MS) };
     try {
       const staged = await this.storage.send(
@@ -352,6 +438,21 @@ export class S3AttachmentObjectStore implements AttachmentObjectStore, Attachmen
   /** Erases a storage object, including when a previous cleanup already removed it. */
   public async deleteObject(objectKey: string): Promise<void> {
     requireObjectKey(objectKey);
+    return this.eraseObject(objectKey);
+  }
+
+  /** Erases an opaque staging object or verified candidate selected by tenant-scoped cleanup. */
+  public async deleteIntakeObject(
+    input: Parameters<IntakeAttachmentObjectEraser['deleteIntakeObject']>[0],
+  ): Promise<void> {
+    const organizationId = checkedOrganization(input.organizationId);
+    if (!INTAKE_STAGING_KEY.test(input.objectKey)) {
+      requireTenantObjectKey(input.objectKey, organizationId);
+    }
+    return this.eraseObject(input.objectKey);
+  }
+
+  private async eraseObject(objectKey: string): Promise<void> {
     try {
       await this.storage.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: objectKey }), {
         abortSignal: AbortSignal.timeout(STORAGE_DEADLINE_MS),

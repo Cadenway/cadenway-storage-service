@@ -10,8 +10,8 @@ export interface AttachmentView {
   readonly contentType: string;
   readonly sizeBytes: number;
 
-  /** Verified uploader and accepted instant. */
-  readonly authorUserId: string;
+  /** Verified uploader, or null for an anonymous intake attachment, and accepted instant. */
+  readonly authorUserId: string | null;
   readonly uploadedAt: string;
   readonly version: number;
   // #endregion

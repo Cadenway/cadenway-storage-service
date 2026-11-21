@@ -15,7 +15,7 @@ export class ReconcileAttachmentObjectsHandler implements OnApplicationBootstrap
   public constructor(
     private readonly workers: JobWorkerRegistry,
     private readonly scheduler: JobScheduler,
-    private readonly reconcile: ReconcileAttachmentObjects,
+    private readonly reconcile: Pick<ReconcileAttachmentObjects, 'execute'>,
     private readonly queue: string,
     private readonly enabled: boolean,
   ) {}

@@ -29,19 +29,38 @@ import { appConfigSchema } from '../src/config/app-config.js';
 import {
   PURGE_UPLOAD_RECEIPTS_QUEUE,
   RECONCILE_ATTACHMENT_OBJECTS_QUEUE,
+  RECONCILE_PROFILE_MEDIA_QUEUE,
   SWEEP_ATTACHMENT_CLEANUP_QUEUE,
+  SWEEP_PROFILE_MEDIA_QUEUE,
 } from '../src/config/job-queues.js';
+import {
+  noStoreProfileMediaErrors,
+  profileMediaPaths,
+} from '../src/infrastructure/http/no-store-profile-media.middleware.js';
+import { noStoreIntakeAttachmentParserErrors } from '../src/infrastructure/http/no-store-intake-attachments.middleware.js';
 import type { AttachmentObjectStore } from '../src/modules/attachments/application/ports/outbound/object-storage/attachment/attachment-object-store.port.js';
 import { CleanPurgedTask } from '../src/modules/attachments/application/use-cases/commands/attachment/clean-purged-task/clean-purged-task.use-case.js';
 import { CleanAttachmentObjects } from '../src/modules/attachments/application/use-cases/commands/attachment/clean-attachment-objects/clean-attachment-objects.use-case.js';
 import { StartAttachmentUpload } from '../src/modules/attachments/application/use-cases/commands/attachment/start-attachment-upload/start-attachment-upload.use-case.js';
+import { IntakeAttachment } from '../src/modules/attachments/domain/aggregates/intake-attachment/intake-attachment.aggregate.js';
 import { UploadReceiptCodec } from '../src/modules/attachments/infrastructure/adapters/crypto/upload-receipt.codec.js';
 import { PostgresAttachmentRuntime } from '../src/modules/attachments/infrastructure/adapters/runtime/postgres-attachment-runtime.adapter.js';
 import { DrizzleAttachmentCleanupDiscovery } from '../src/modules/attachments/infrastructure/persistence/drizzle/repositories/attachment/drizzle-attachment-cleanup-discovery.repository.js';
 import { DrizzleAttachmentReader } from '../src/modules/attachments/infrastructure/persistence/drizzle/repositories/attachment/drizzle-attachment-reader.repository.js';
 import { DrizzleAttachmentReconciliation } from '../src/modules/attachments/infrastructure/persistence/drizzle/repositories/attachment/drizzle-attachment-reconciliation.repository.js';
 import { DrizzleAttachmentTransaction } from '../src/modules/attachments/infrastructure/persistence/drizzle/repositories/attachment/drizzle-attachment-transaction.repository.js';
+import { DrizzleExpiredUploadReceipts } from '../src/modules/attachments/infrastructure/persistence/drizzle/repositories/attachment/drizzle-expired-upload-receipts.repository.js';
+import { DrizzleIntakeAttachmentTransaction } from '../src/modules/attachments/infrastructure/persistence/drizzle/repositories/attachment/drizzle-intake-attachment-transaction.repository.js';
 import { DrizzleAttachmentCleanupUnitOfWork } from '../src/modules/attachments/infrastructure/persistence/drizzle/transactions/attachment/drizzle-attachment-cleanup.unit-of-work.js';
+import { AbandonProfileMedia } from '../src/modules/profile-media/application/use-cases/commands/media/abandon-profile-media/abandon-profile-media.use-case.js';
+import { ApplyProfileMediaChange } from '../src/modules/profile-media/application/use-cases/commands/media/apply-profile-media-change/apply-profile-media-change.use-case.js';
+import { ProfileMediaUpload } from '../src/modules/profile-media/domain/aggregates/media/profile-media-upload.aggregate.js';
+import { AesProfileMediaReceiptCipher } from '../src/modules/profile-media/infrastructure/adapters/crypto/aes-profile-media-receipt-cipher.adapter.js';
+import {
+  deleteExpiredProfileMediaReceipts,
+  DrizzleProfileMediaCleanupTransaction,
+} from '../src/modules/profile-media/infrastructure/persistence/drizzle/repositories/media/drizzle-profile-media-cleanup-transaction.repository.js';
+import { DrizzleProfileMediaTransaction } from '../src/modules/profile-media/infrastructure/persistence/drizzle/repositories/media/drizzle-profile-media-transaction.repository.js';
 
 // The service as main.ts assembles it, on a disposable PostgreSQL and NATS.
 // `@cadenway/nest-testing` does not export its container fixtures yet and a service never depends
@@ -87,7 +106,20 @@ const attachmentTables = [
   'attachment_task_tombstones',
   'attachment_upload_claims',
   'attachments',
+  'intake_attachment_candidates',
+  'intake_attachment_upload_claims',
+  'intake_attachments',
 ] as const;
+
+const profileTables = [
+  'profile_media_cursors',
+  'profile_media_objects',
+  'profile_media_owners',
+  'profile_media_receipts',
+  'profile_media_uploads',
+] as const;
+
+const serviceTables = [...attachmentTables, ...platformTables, ...profileTables].sort();
 
 /**
  * Runs `docker compose` on the throwaway project.
@@ -312,6 +344,8 @@ describe('storage-service wiring', () => {
       },
       logDestination: { write: (): void => undefined },
     });
+    app.use('/internal/v1/intake-publications', noStoreIntakeAttachmentParserErrors);
+    app.use(profileMediaPaths, noStoreProfileMediaErrors);
     await app.init();
     signer = await InternalTokenSigner.create({
       issuer: 'api-gateway',
@@ -339,12 +373,12 @@ describe('storage-service wiring', () => {
     );
 
     expect(tables.rows).toEqual(
-      [...attachmentTables, ...platformTables].map((tablename) => ({
+      serviceTables.map((tablename) => ({
         tablename,
         tableowner: 'storage_migrator',
       })),
     );
-    expect(journal.rows).toEqual([{ applied: 2 }]);
+    expect(journal.rows).toEqual([{ applied: 4 }]);
   });
 
   it('applies nothing when the migrator runs again', async () => {
@@ -353,14 +387,16 @@ describe('storage-service wiring', () => {
     const journal = await migrator.query<{ applied: number }>(
       'select count(*)::int as applied from drizzle.__drizzle_migrations',
     );
-    expect(journal.rows).toEqual([{ applied: 2 }]);
+    expect(journal.rows).toEqual([{ applied: 4 }]);
   });
 
   it('provisions all scheduled cleanup queues with the migrator', async () => {
     const expected = [
       PURGE_UPLOAD_RECEIPTS_QUEUE,
       RECONCILE_ATTACHMENT_OBJECTS_QUEUE,
+      RECONCILE_PROFILE_MEDIA_QUEUE,
       SWEEP_ATTACHMENT_CLEANUP_QUEUE,
+      SWEEP_PROFILE_MEDIA_QUEUE,
     ];
     const queues = await migrator.query<{ name: string }>(
       'select name from pgboss.queue where name = any($1::text[]) order by name',
@@ -370,7 +406,7 @@ describe('storage-service wiring', () => {
     expect(queues.rows.map((queue) => queue.name)).toEqual(expected);
   });
 
-  it('forces row-level security on tenant-owned and system-only attachment tables', async () => {
+  it('forces row-level security on media tables and the platform outbox', async () => {
     const tables = await migrator.query<{
       relname: string;
       relrowsecurity: boolean;
@@ -385,35 +421,202 @@ describe('storage-service wiring', () => {
       `select tablename, policyname from pg_policies where schemaname = 'public' order by tablename`,
     );
 
-    expect(tables.rows).toEqual([
-      ...attachmentTables.map((relname) => ({
+    expect(tables.rows).toEqual(
+      serviceTables.map((relname) => ({
         relname,
-        relrowsecurity: true,
-        relforcerowsecurity: true,
+        relrowsecurity: relname !== 'processed_events',
+        relforcerowsecurity: relname !== 'processed_events',
       })),
-      { relname: 'event_versions', relrowsecurity: true, relforcerowsecurity: true },
-      { relname: 'idempotency_keys', relrowsecurity: true, relforcerowsecurity: true },
-      { relname: 'outbox_events', relrowsecurity: true, relforcerowsecurity: true },
-      { relname: 'processed_events', relrowsecurity: false, relforcerowsecurity: false },
-    ]);
-    expect(policies.rows).toEqual([
-      ...attachmentTables.map((tablename) => ({
-        tablename,
-        policyname:
-          tablename === 'attachment_reconciliation_cursors'
-            ? 'attachment_reconciliation_system_access'
-            : `${tablename}_organization_isolation`,
-      })),
-      { tablename: 'event_versions', policyname: 'event_versions_organization_isolation' },
-      { tablename: 'idempotency_keys', policyname: 'idempotency_keys_organization_isolation' },
-      { tablename: 'outbox_events', policyname: 'outbox_events_organization_isolation' },
-    ]);
+    );
+    expect(policies.rows).toEqual(
+      serviceTables
+        .filter((table) => table !== 'processed_events')
+        .map((tablename) => ({
+          tablename,
+          policyname:
+            tablename === 'attachment_reconciliation_cursors'
+              ? 'attachment_reconciliation_system_access'
+              : tablename === 'profile_media_cursors'
+                ? 'profile_media_cursors_system_access'
+                : `${tablename}_organization_isolation`,
+        })),
+    );
   });
 
+  it('keeps account media out of logo tenant transactions and isolates organization logo owners', async () => {
+    const system: SystemTransactionRunner = service().get(SystemTransactionRunner);
+    const tenant: TenantTransactionRunner = service().get(TenantTransactionRunner);
+    const expectedLogo = { owner_kind: 'organization-logo', owner_id: atelierNordId };
+    await system.run((scope) =>
+      scope.client.query(
+        `insert into profile_media_owners (organization_id, owner_kind, owner_id)
+         values (null, 'avatar', $1), ($2, 'organization-logo', $2)`,
+        [camilleMartinId, atelierNordId],
+      ),
+    );
+
+    try {
+      const read = (organizationId: string) =>
+        runWithOrganizationContext(memberOf(organizationId), () =>
+          tenant.run(async (scope) => {
+            const result = await scope.client.query(
+              `select owner_kind, owner_id from profile_media_owners
+               where owner_id in ($1, $2) order by owner_kind`,
+              [camilleMartinId, atelierNordId],
+            );
+            return result.rows;
+          }),
+        );
+      await expect(read(atelierNordId)).resolves.toEqual([expectedLogo]);
+      await expect(read(otherOrganizationId)).resolves.toEqual([]);
+      await expect(
+        runWithOrganizationContext(memberOf(otherOrganizationId), () =>
+          tenant.run((scope) =>
+            scope.client.query(
+              `insert into profile_media_owners (organization_id, owner_kind, owner_id)
+                values (null, 'avatar', $1)`,
+              [otherOrganizationId],
+            ),
+          ),
+        ),
+      ).rejects.toMatchObject({ code: '42501' });
+    } finally {
+      await system.run((scope) =>
+        scope.client.query('delete from profile_media_owners where owner_id in ($1, $2)', [
+          camilleMartinId,
+          atelierNordId,
+        ]),
+      );
+    }
+  });
+
+  it('preserves the largest published owner generation and retires explicitly stale assets', async () => {
+    const owner = { kind: 'avatar', id: '019a5f3c-8d2e-7c4a-9b1f-3e5d7a9c1b43' } as const;
+    const retired = '019a7006-2c3d-7e4f-8a5b-6c7d8e9f0a33';
+    const stale = '019a7006-2c3d-7e4f-8a5b-6c7d8e9f0a34';
+    const explicitlyReplaced = '019a7006-2c3d-7e4f-8a5b-6c7d8e9f0a35';
+    const change = service().get(ApplyProfileMediaChange);
+    const system: SystemTransactionRunner = service().get(SystemTransactionRunner);
+    await system.run(async (scope) => {
+      await change.execute({
+        owner,
+        generation: Number.MAX_SAFE_INTEGER,
+        assetId: null,
+        oldAssetId: retired,
+      });
+      await change.execute({
+        owner,
+        generation: Number.MAX_SAFE_INTEGER - 1,
+        assetId: stale,
+        oldAssetId: explicitlyReplaced,
+      });
+      const ownerState = await scope.client.query(
+        'select generation::text as generation, asset_id from profile_media_owners where owner_id = $1',
+        [owner.id],
+      );
+      expect(ownerState.rows).toEqual([
+        { generation: String(Number.MAX_SAFE_INTEGER), asset_id: null },
+      ]);
+      const uploads = await scope.client.query(
+        'select upload_id, status from profile_media_uploads where owner_id = $1 order by upload_id',
+        [owner.id],
+      );
+      expect(uploads.rows).toEqual(
+        [retired, stale, explicitlyReplaced].map((upload_id) => ({ upload_id, status: 'retired' })),
+      );
+      await scope.client.query('delete from profile_media_uploads where owner_id = $1', [owner.id]);
+      await scope.client.query('delete from profile_media_owners where owner_id = $1', [owner.id]);
+    });
+  });
+
+  it('retires an abandoned reservation without shortening staging expiry or signed receipt replay', async () => {
+    const owner = { kind: 'avatar', id: '019a5f3c-8d2e-7c4a-9b1f-3e5d7a9c1b44' } as const;
+    const uploadId = '019a7006-2c3d-7e4f-8a5b-6c7d8e9f0a36';
+    const expiresAt = new Date(Date.now() + 3 * 60_000);
+    const abandon = service().get(AbandonProfileMedia);
+    const system: SystemTransactionRunner = service().get(SystemTransactionRunner);
+    await system.run(async (scope) => {
+      await scope.client.query(
+        "insert into profile_media_owners (owner_kind, owner_id) values ('avatar', $1)",
+        [owner.id],
+      );
+      await scope.client.query(
+        `insert into profile_media_uploads
+          (owner_kind, owner_id, upload_id, uploader_user_id, status, content_type, size_bytes, expires_at)
+          values ('avatar', $1, $2, $1, 'pending', 'image/png', 12, $3)`,
+        [owner.id, uploadId, expiresAt],
+      );
+      await scope.client.query(
+        `insert into profile_media_objects
+          (owner_kind, owner_id, upload_id, object_id, role, status, cleanup_after)
+          values ('avatar', $1, $2, $2, 'staging', 'active', $3)`,
+        [owner.id, uploadId, expiresAt],
+      );
+      await scope.client.query(
+        `insert into profile_media_receipts
+          (owner_kind, owner_id, upload_id, key_id, nonce, ciphertext, auth_tag, receipt_expires_at)
+          values ('avatar', $1, $2, 'fixture', $3, $4, $5, $6)`,
+        [owner.id, uploadId, Buffer.alloc(12), Buffer.from([1]), Buffer.alloc(16), expiresAt],
+      );
+
+      await abandon.execute({ owner, uploadId });
+      const snapshot = await scope.client.query(
+        `select u.status, o.status as object_status, o.cleanup_after, r.key_id
+          from profile_media_uploads as u
+          join profile_media_objects as o using (owner_kind, owner_id, upload_id)
+          left join profile_media_receipts as r using (owner_kind, owner_id, upload_id)
+          where u.owner_id = $1 and u.upload_id = $2`,
+        [owner.id, uploadId],
+      );
+      expect(snapshot.rows).toEqual([
+        { status: 'retired', object_status: 'fenced', cleanup_after: expiresAt, key_id: 'fixture' },
+      ]);
+      await deleteExpiredProfileMediaReceipts(scope, 20);
+      const live = await scope.client.query(
+        'select key_id from profile_media_receipts where owner_id = $1',
+        [owner.id],
+      );
+      expect(live.rows).toEqual([{ key_id: 'fixture' }]);
+      await scope.client.query(
+        "update profile_media_receipts set receipt_expires_at = statement_timestamp() - interval '1 second' where owner_id = $1",
+        [owner.id],
+      );
+      await deleteExpiredProfileMediaReceipts(scope, 20);
+      const expired = await scope.client.query(
+        'select key_id from profile_media_receipts where owner_id = $1',
+        [owner.id],
+      );
+      expect(expired.rows).toEqual([]);
+
+      const cleanup = new DrizzleProfileMediaCleanupTransaction(scope, owner);
+      await scope.client.query(
+        'update profile_media_owners set deleted = true, cleanup_requested = true where owner_id = $1',
+        [owner.id],
+      );
+      expect(await cleanup.compactDeletedUploads(1)).toBe(0);
+      await scope.client.query(
+        "update profile_media_objects set status = 'cleaned' where owner_id = $1",
+        [owner.id],
+      );
+      expect(await cleanup.compactDeletedUploads(1)).toBe(1);
+      expect(await cleanup.finishDeletedOwner()).toBe(true);
+      const fence = await scope.client.query(
+        'select upload_id, status, uploader_user_id, content_type from profile_media_uploads where owner_id = $1',
+        [owner.id],
+      );
+      expect(fence.rows).toEqual([
+        { upload_id: uploadId, status: 'retired', uploader_user_id: null, content_type: null },
+      ]);
+      await scope.client.query('delete from profile_media_objects where owner_id = $1', [owner.id]);
+      await scope.client.query('delete from profile_media_uploads where owner_id = $1', [owner.id]);
+      await scope.client.query('delete from profile_media_owners where owner_id = $1', [owner.id]);
+    });
+  });
   it('isolates attachment metadata, candidates, purge records and upload claims by organization', async () => {
     const tenant = service().get(TenantTransactionRunner);
     const attachmentId = randomUUID();
     const objectKey = `org/${atelierNordId}/${attachmentId}`;
+    const publicationId = '019a7001-2b3c-7d4e-8f5a-6b7c8d9e0f12';
     const statements: readonly { readonly sql: string; readonly values: readonly unknown[] }[] = [
       {
         sql: `insert into attachments
@@ -447,6 +650,23 @@ describe('storage-service wiring', () => {
           Buffer.from([1, 2, 3]),
           Buffer.alloc(16),
         ],
+      },
+      {
+        sql: `insert into intake_attachments (organization_id, publication_id, id, status, decided_at)
+          values ($1, $2, $3, 'released', now())`,
+        values: [atelierNordId, publicationId, attachmentId],
+      },
+      {
+        sql: `insert into intake_attachment_candidates
+          (organization_id, publication_id, attachment_id, object_key, status, cleanup_after)
+          values ($1, $2, $3, $4, 'fenced', now() + interval '5 minutes')`,
+        values: [atelierNordId, publicationId, attachmentId, `intake/${attachmentId}`],
+      },
+      {
+        sql: `insert into intake_attachment_upload_claims
+          (organization_id, publication_id, attachment_id, fingerprint, expires_at)
+          values ($1, $2, $3, 'test-fingerprint', now() + interval '1 day')`,
+        values: [atelierNordId, publicationId, attachmentId],
       },
     ];
 
@@ -492,6 +712,268 @@ describe('storage-service wiring', () => {
         }
       }),
     );
+  });
+
+  it('shares the receipt cleanup batch limit with intake and preserves unexpired receipts', async () => {
+    const system: SystemTransactionRunner = service().get(SystemTransactionRunner);
+    const purge = new DrizzleExpiredUploadReceipts(system);
+    const publicationId = '019a7001-2b3c-7d4e-8f5a-6b7c8d9e0f12';
+    await system.run(async (tx) => {
+      await tx.client.query(
+        `insert into attachment_upload_claims
+          (organization_id, actor_id, task_key, key_digest, fingerprint, expires_at)
+          values ($1, $2, 'CAD-483', 'receipt-cleanup-test', 'test', now() - interval '1 hour')`,
+        [atelierNordId, camilleMartinId],
+      );
+      await tx.client.query(
+        `insert into intake_attachment_upload_claims
+          (organization_id, publication_id, attachment_id, fingerprint, expires_at)
+          values ($1, $3, uuidv7(), 'receipt-cleanup-test', now() - interval '1 hour'),
+                 ($2, $3, uuidv7(), 'receipt-cleanup-test', now() - interval '2 hours'),
+                 ($2, $3, uuidv7(), 'receipt-cleanup-test', now() + interval '1 hour')`,
+        [atelierNordId, otherOrganizationId, publicationId],
+      );
+
+      await expect(purge.deleteBatch(2)).resolves.toBe(2);
+      await expect(purge.deleteBatch(2)).resolves.toBe(1);
+      await expect(purge.deleteBatch(2)).resolves.toBe(0);
+      const remaining = await tx.client.query(
+        `delete from intake_attachment_upload_claims
+          where publication_id = $1 and fingerprint = 'receipt-cleanup-test'
+          returning organization_id`,
+        [publicationId],
+      );
+      expect(remaining.rows).toEqual([{ organization_id: otherOrganizationId }]);
+    });
+  });
+
+  it('persists the exact signed cutoff with its encrypted intake receipt and replays it', async () => {
+    const tenant: TenantTransactionRunner = service().get(TenantTransactionRunner);
+    const identity = {
+      organizationId: atelierNordId,
+      publicationId: '019a7001-2b3c-7d4e-8f5a-6b7c8d9e0f13',
+      attachmentId: '019a7004-3b2c-7d4e-8f5a-6b7c8d9e0f83',
+    };
+    const reservedAt = new Date();
+    const stagingObjectKey = 'intake/019a7006-7a8b-7c9d-8e0f-1a2b3c4d5d82';
+    const signedExpiry = new Date(reservedAt.getTime() + 4 * 60_000);
+    const allocation = IntakeAttachment.reserve({
+      ...identity,
+      id: identity.attachmentId,
+      stagingObjectKey,
+      fileName: 'sprint-14.png',
+      contentType: 'image/png',
+      sizeBytes: 42,
+      reservedAt,
+      expiresAt: new Date(reservedAt.getTime() + 30 * 60_000),
+    });
+    const capability = {
+      id: identity.attachmentId,
+      method: 'POST',
+      url: 'https://files.example.test/intake',
+      fields: { key: stagingObjectKey },
+      expiresAt: signedExpiry.toISOString(),
+    } as const;
+    const receipts = new UploadReceiptCodec({
+      activeKeyId: 'intake-test',
+      keys: [{ id: 'intake-test', key: randomBytes(32).toString('base64url') }],
+    });
+
+    await runWithOrganizationContext(
+      {
+        organizationId: atelierNordId,
+        actor: { type: 'system', id: null },
+        role: null,
+        scopes: [],
+      },
+      () =>
+        tenant.run(async (scope) => {
+          const store = new DrizzleIntakeAttachmentTransaction(
+            scope,
+            atelierNordId,
+            () => Promise.reject(new Error('Unexpected verification event.')),
+            () => Promise.reject(new Error('Unexpected file event.')),
+            receipts,
+          );
+          expect(await store.lock(identity)).toBeNull();
+          const lease = await store.beginSigning(allocation);
+          if (lease.kind !== 'acquired') throw new Error('Expected the original signing lease.');
+          await expect(store.completeSigning(identity, lease.claimId, capability)).resolves.toEqual(
+            { kind: 'completed' },
+          );
+          const stored = await store.lock(identity);
+          expect(stored?.snapshot.reservation?.uploadExpiresAt).toEqual(signedExpiry);
+          await expect(store.beginSigning(allocation)).resolves.toEqual({
+            kind: 'replay',
+            capability,
+          });
+
+          const keys = [identity.organizationId, identity.publicationId, identity.attachmentId];
+          await scope.client.query(
+            'delete from intake_attachment_upload_claims where organization_id = $1 and publication_id = $2 and attachment_id = $3',
+            keys,
+          );
+          await scope.client.query(
+            'delete from intake_attachment_candidates where organization_id = $1 and publication_id = $2 and attachment_id = $3',
+            keys,
+          );
+          await scope.client.query(
+            'delete from intake_attachments where organization_id = $1 and publication_id = $2 and id = $3',
+            keys,
+          );
+        }),
+    );
+  });
+
+  it('scrubs terminal intake declarations and receipts while retaining the object ledger and claimed file', async () => {
+    const tenant: TenantTransactionRunner = service().get(TenantTransactionRunner);
+    const receiptCodec = new UploadReceiptCodec({
+      activeKeyId: 'intake-test',
+      keys: [{ id: 'intake-test', key: randomBytes(32).toString('base64url') }],
+    });
+    const abort = new Error('rollback intake privacy fixture');
+    const scopeContext = {
+      organizationId: atelierNordId,
+      actor: { type: 'system' as const, id: null },
+      role: null,
+      scopes: [],
+    };
+    await expect(
+      runWithOrganizationContext(scopeContext, () =>
+        tenant.run(async (scope) => {
+          for (const [index, decision] of ['released', 'claimed'].entries()) {
+            const identity = {
+              organizationId: atelierNordId,
+              publicationId: '019a7001-2b3c-7d4e-8f5a-6b7c8d9e0f13',
+              attachmentId: `019a7004-3b2c-7d4e-8f5a-6b7c8d9e0f9${String(index)}`,
+            };
+            const reservedAt = new Date();
+            const staging = `intake/019a7006-7a8b-7c9d-8e0f-1a2b3c4d5e9${String(index)}`;
+            const candidate = `org/${atelierNordId}/019a7006-7a8b-7c9d-8e0f-1a2b3c4d5d9${String(index)}`;
+            const reserved = IntakeAttachment.reserve({
+              ...identity,
+              id: identity.attachmentId,
+              stagingObjectKey: staging,
+              fileName: 'applicant-private.png',
+              contentType: 'image/png',
+              sizeBytes: 42,
+              reservedAt,
+              expiresAt: new Date(reservedAt.getTime() + 1_800_000),
+            });
+            let files = 0;
+            const store = () =>
+              new DrizzleIntakeAttachmentTransaction(
+                scope,
+                atelierNordId,
+                () => Promise.resolve(),
+                () => {
+                  files += 1;
+                  return Promise.resolve();
+                },
+                receiptCodec,
+              );
+            const signing = store();
+            await signing.lock(identity);
+            expect((await signing.beginSigning(reserved)).kind).toBe('acquired');
+            const verificationAt = new Date(reservedAt.getTime() + 1000);
+            const verified = reserved.verify(
+              candidate,
+              { sizeBytes: 42, contentType: 'image/png', verifiedContentType: 'image/png' },
+              verificationAt,
+            );
+            if (verified.event === null) throw new Error('Expected verified event.');
+            await signing.registerCandidate(
+              identity,
+              candidate,
+              reserved.snapshot.reservation?.expiresAt ?? reservedAt,
+            );
+            expect(
+              await signing.electVerified(
+                identity,
+                verified.intakeAttachment,
+                candidate,
+                verified.event,
+              ),
+            ).toBe(true);
+            const active = await signing.lock(identity);
+            expect(active?.snapshot).toMatchObject({
+              status: 'verified',
+              candidateKey: candidate,
+              reservation: { fileName: 'applicant-private.png' },
+            });
+            const terminal = store();
+            if (decision === 'claimed') await terminal.lockTask(`CAD-${String(490 + index)}`);
+            const current = await terminal.lock(identity);
+            if (current === null) throw new Error('Expected reservation.');
+            const change =
+              decision === 'claimed'
+                ? current.claim(`CAD-${String(490 + index)}`, false, verificationAt)
+                : null;
+            await terminal.saveDecision(
+              identity,
+              change?.intakeAttachment ?? current.release(verificationAt),
+              change?.attachment ?? null,
+              change?.event ?? null,
+            );
+            const keys = [identity.organizationId, identity.publicationId, identity.attachmentId];
+            const stored = await scope.client.query(
+              'select * from intake_attachments where organization_id=$1 and publication_id=$2 and id=$3',
+              keys,
+            );
+            expect(stored.rows[0]).toMatchObject({
+              status: decision,
+              staging_object_key: null,
+              file_name: null,
+              content_type: null,
+              size_bytes: null,
+              reserved_at: null,
+              expires_at: null,
+              upload_expires_at: null,
+              candidate_key: null,
+              verified_at: null,
+            });
+            expect(
+              (
+                await scope.client.query(
+                  'select * from intake_attachment_upload_claims where organization_id=$1 and publication_id=$2 and attachment_id=$3',
+                  keys,
+                )
+              ).rows,
+            ).toHaveLength(0);
+            const ledger = await scope.client.query(
+              'select object_key, status from intake_attachment_candidates where organization_id=$1 and publication_id=$2 and attachment_id=$3 order by object_key',
+              keys,
+            );
+            expect(ledger.rows).toHaveLength(2);
+            expect(ledger.rows).toContainEqual({
+              object_key: candidate,
+              status: decision === 'claimed' ? 'elected' : 'fenced',
+            });
+            const restored = await terminal.lock(identity);
+            expect(restored?.snapshot).toMatchObject({
+              status: decision,
+              reservation: null,
+              candidateKey: null,
+              verifiedAt: null,
+            });
+            expect(
+              restored?.claim(`CAD-${String(490 + index)}`, false, verificationAt).event,
+            ).toBeNull();
+            const attachment = await scope.client.query(
+              'select file_name, elected_object_key from attachments where organization_id=$1 and id=$2',
+              [atelierNordId, identity.attachmentId],
+            );
+            if (decision === 'claimed')
+              expect(attachment.rows).toEqual([
+                { file_name: 'applicant-private.png', elected_object_key: candidate },
+              ]);
+            else expect(attachment.rows).toHaveLength(0);
+            expect(files).toBe(decision === 'claimed' ? 1 : 0);
+          }
+          throw abort;
+        }),
+      ),
+    ).rejects.toBe(abort);
   });
 
   it('hides purged-task attachments from every reader before cleanup while retaining live tasks', async () => {
@@ -1465,6 +1947,77 @@ describe('storage-service wiring', () => {
     expect(response.body).toEqual({ reached: true });
   });
 
+  it('mounts an authenticated account avatar path and hides absent derivatives without caching', async () => {
+    const token = await signer.sign('storage-service', {
+      actor: { type: 'user', id: camilleMartinId },
+      organizationId: null,
+    });
+    const assetId = '019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b99';
+    const response = await request(service().getHttpServer())
+      .get(`/internal/v1/avatars/${assetId}`)
+      .query({ ownerUserId: camilleMartinId })
+      .set('Authorization', `Bearer ${token}`)
+      .set('If-None-Match', '*');
+    expect(response.status).toBe(404);
+    expect(response.body).toMatchObject({ code: 'media.not-found' });
+    expect(response.headers['cache-control']).toBe('no-store');
+  });
+
+  it('seals and reads the original media receipt using the PostgreSQL retention clock', async () => {
+    const owner = { kind: 'avatar', id: randomUUID() } as const;
+    const uploadId = '019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b98';
+    const now = new Date();
+    const expiresAt = new Date(Math.floor(now.getTime() / 1_000) * 1_000 + 60_000);
+    const upload = ProfileMediaUpload.reserve(
+      {
+        owner,
+        uploadId,
+        uploaderUserId: owner.id,
+        contentType: 'image/png',
+        sizeBytes: 24,
+        expiresAt,
+      },
+      now,
+    );
+    const capability = {
+      uploadId,
+      url: 'https://files.example.test/fixture',
+      method: 'POST' as const,
+      fields: { key: 'profile-media/staging/fixture' },
+      expiresAt: expiresAt.toISOString(),
+    };
+    const cipher = new AesProfileMediaReceiptCipher('fixture', [
+      { id: 'fixture', key: randomBytes(32).toString('base64url') },
+    ]);
+    const runner: SystemTransactionRunner = service().get(SystemTransactionRunner);
+    await runner.run(async (scope) => {
+      const uploads = new DrizzleProfileMediaTransaction(scope, owner, cipher);
+      await uploads.lockOwner(owner);
+      await uploads.insertUpload(upload);
+      const lease = await uploads.claimSigning(owner, uploadId);
+      if (lease === null) throw new Error('Media test lease unavailable.');
+      expect(await uploads.completeSigning(owner, uploadId, lease, capability)).toBe(true);
+    });
+    await runner.run(async (scope) => {
+      const uploads = new DrizzleProfileMediaTransaction(scope, owner, cipher);
+      await uploads.lockOwner(owner);
+      expect(await uploads.findCapability(owner, uploadId)).toEqual(capability);
+      const receipt = await scope.client.query(
+        `select receipt_expires_at between statement_timestamp() + interval '23 hours'
+          and statement_timestamp() + interval '25 hours' as retained
+          from profile_media_receipts where owner_id = $1 and upload_id = $2`,
+        [owner.id, uploadId],
+      );
+      expect(receipt.rows).toEqual([{ retained: true }]);
+      await scope.client.query('delete from profile_media_receipts where owner_id = $1', [
+        owner.id,
+      ]);
+      await scope.client.query('delete from profile_media_objects where owner_id = $1', [owner.id]);
+      await scope.client.query('delete from profile_media_uploads where owner_id = $1', [owner.id]);
+      await scope.client.query('delete from profile_media_owners where owner_id = $1', [owner.id]);
+    });
+  });
+
   it('refuses a token signed for another service', async () => {
     const token = await signer.sign('document-service', {
       actor: { type: 'user', id: camilleMartinId },
@@ -1591,7 +2144,7 @@ describe('storage-service wiring', () => {
     const journal = await migrator.query<{ applied: number }>(
       'select count(*)::int as applied from drizzle.__drizzle_migrations',
     );
-    expect(journal.rows).toEqual([{ applied: 2 }]);
+    expect(journal.rows).toEqual([{ applied: 4 }]);
   });
 
   it('runs the outbox relay and marks an acknowledged event as sent', async () => {
@@ -1634,6 +2187,37 @@ describe('storage-service wiring', () => {
       brokerAccepts(storage, '--inbox-prefix', '_INBOX.storage', 'stream', 'info', 'EVENTS'),
     ).toBe(true);
     expect(brokerAccepts(storage, 'stream', 'info', 'EVENTS')).toBe(false);
+    for (const name of [
+      'claim-intake-attachment',
+      'release-intake-attachment',
+      'apply-avatar-change',
+      'abandon-avatar-upload',
+      'delete-avatar-owner',
+      'apply-organization-logo-change',
+      'abandon-organization-logo-upload',
+    ]) {
+      expect(
+        brokerAccepts(
+          storage,
+          '--inbox-prefix',
+          '_INBOX.storage',
+          'consumer',
+          'info',
+          'EVENTS',
+          `storage-service__${name}`,
+        ),
+      ).toBe(true);
+    }
+    expect(brokerAccepts(storage, 'pub', 'evt.intake.attachment-claimed.v1', 'refused')).toBe(
+      false,
+    );
+    expect(brokerAccepts(storage, 'pub', 'evt.intake.attachment-released.v1', 'refused')).toBe(
+      false,
+    );
+    expect(brokerAccepts(storage, 'pub', 'evt.user.avatar-changed.v1', 'refused')).toBe(false);
+    expect(brokerAccepts(storage, 'pub', 'evt.organization.logo-changed.v1', 'refused')).toBe(
+      false,
+    );
     expect(brokerAccepts(storage, 'pub', 'evt.task.wiring-probe', 'refused')).toBe(false);
     expect(brokerAccepts({ NATS_USER: '', NATS_PASSWORD: '' }, 'pub', 'evt.file.x', 'x')).toBe(
       false,

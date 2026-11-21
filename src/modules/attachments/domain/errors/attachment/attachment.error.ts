@@ -13,6 +13,7 @@ export class AttachmentError extends DomainError {
       | 'invalid-size'
       | 'file-too-large'
       | 'invalid-state'
+      | 'reservation-conflict'
       | 'upload-expired'
       | 'upload-metadata-mismatch'
       | 'upload-not-ready'

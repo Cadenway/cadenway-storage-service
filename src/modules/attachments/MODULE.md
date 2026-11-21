@@ -21,6 +21,9 @@ and OVH Object Storage stores bytes in production.
 | `attachment_reconciliation_cursors` | System-owned cursor and lease for physical object reconciliation |
 | `attachment_task_tombstones`        | Task key locks, permanent purge records, and pending cleanup     |
 | `attachment_upload_claims`          | Active signing lease and encrypted response for 24-hour replay   |
+| `intake_attachments`                | Anonymous reservations and immutable Task decisions              |
+| `intake_attachment_candidates`      | Opaque staging and immutable candidates awaiting decisions       |
+| `intake_attachment_upload_claims`   | Active signing lease and encrypted response for intake replay    |
 
 The attachment tables use forced organization isolation. The reconciliation cursor uses a forced
 system-only policy.
@@ -45,20 +48,35 @@ archived task. Mutations require edit access and an active task and list. Comple
 to the account that reserved the upload. The largest-files route is an internal quota input for
 an authorized organization owner or administrator.
 
+| Intake route                                                                                  | Purpose                           |
+| --------------------------------------------------------------------------------------------- | --------------------------------- |
+| `POST /internal/v1/intake-publications/{publicationId}/attachments`                           | Sign a Task-allocated upload      |
+| `POST /internal/v1/intake-publications/{publicationId}/attachments/{attachmentId}/completion` | Verify and pin the immutable copy |
+
+Both intake operations require a signed API gateway system token with the organization returned by
+Task. The gateway authorizes the exact publication, draft and attachment with Task before calling.
+Storage returns only the published response fields with `Cache-Control: no-store`.
+
 ## Events emitted
 
 - `file.uploaded.v1` when a verified object becomes a ready attachment.
 - `file.deleted.v1` when a ready attachment is removed manually or by a task purge.
+- `intake.attachment-verified.v1` when the tenant transaction pins a verified intake copy.
 
 Facts carry the organization, actor, file ID, stable task key, verified byte count and attachment
 version. Finalizing a ready upload again or expiring an unfinished reservation adds no fact.
 The outbox assigns the event ID and occurrence time in the tenant transaction. Consumers can
 reconcile file state by organization, file ID and version using the published Storage facts.
+The intake verification actor is the Storage system. It carries only the organization,
+publication and reserved attachment identifiers. Verification alone neither attaches the object to
+a task nor adds bytes to the ready file count.
 
 ## Events consumed
 
 - `task.purged.v1` records the permanent revocation of the task key and schedules bounded cleanup
   of pending and ready attachments in that organization. Duplicate delivery has a single effect.
+- `intake.attachment-claimed.v1` and `intake.attachment-released.v1` record the authoritative Task
+  decisions, including decisions that arrive before the reservation is seen locally.
 
 The broker's Task publisher permission authorizes the subject. The envelope actor identifies the
 cause of the purge and is carried forward to the resulting deletion facts. The durable
@@ -67,6 +85,12 @@ the version for the individual task key and the cleanup request in one tenant tr
 failures retry after 1 s, 5 s, 30 s and 2 min. Invalid deliveries and a fifth failure reach
 `EVENTS_DLQ`. Operators inspect the affected delivery and replay the original Task fact after
 correcting the cause.
+
+The separate `storage-service__claim-intake-attachment` and
+`storage-service__release-intake-attachment` durables replay retained decisions from the Task system
+actor in the delivery deduplication transaction. A claim binds an elected copy only if the task
+purge fence permits it. A ready anonymous attachment has a null account author and the Storage
+system actor on its `file.uploaded.v1` fact. A release suppresses a later start or verification.
 
 ## Invariants
 
@@ -81,6 +105,11 @@ correcting the cause.
   organization scope. Deletion and task purge stop new signed downloads.
 - Signed downloads use `Content-Disposition: attachment`. HTML and SVG are never served inline.
   Keep signed URLs, upload fields and storage object keys out of logs, traces and published facts.
+- Intake staging keys use `intake/<uuid>` without a tenant or publication identifier. The received
+  organization scopes all database access and the eventual ready file uses a verified tenant key.
+  Storage persists the exact signed deadline with the receipt and checks it before copying and
+  before electing a new pin. A pinned copy remains until Task makes its terminal decision even
+  after the draft expires.
 
 ## Transactions
 
@@ -97,6 +126,9 @@ and enters the tenant scope before changing attachment state or appending facts.
 object before erasing it and acknowledges the selected generation after confirmation. A separate
 leased scan advances through physical keys in the object store and requeues known late writes.
 The storage principal needs `s3:ListBucket` for the configured attachment bucket.
+The same schedules drain expired encrypted receipts from both paths and reconcile the separate
+`org/` and opaque `intake/` inventories under independent cursor leases. The object storage policy
+needs to allow listing both prefixes when intake uploads are enabled.
 
 ## Decisions
 

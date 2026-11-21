@@ -3,16 +3,22 @@ import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import {
   CopyObjectCommand,
+  GetObjectCommand,
   HeadBucketCommand,
+  HeadObjectCommand,
   PutBucketCorsCommand,
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
+import sharp from 'sharp';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
+import { ProfileMediaImageProcessor } from '../../../../profile-media/infrastructure/adapters/image-processing/profile-media-image-processor.adapter.js';
+import { S3ProfileMediaObjects } from '../../../../profile-media/infrastructure/adapters/object-storage/s3-profile-media-objects.adapter.js';
 import type { UploadCapability } from '../../../application/models/attachment/upload-capability.model.js';
 import { S3AttachmentObjectStore } from './s3-attachment-object-store.adapter.js';
 
@@ -34,7 +40,7 @@ const PNG = Uint8Array.from(
 
 /** Sends the form exactly as a browser sends the provided upload capability. */
 async function upload(
-  capability: UploadCapability,
+  capability: Pick<UploadCapability, 'url' | 'fields'>,
   bytes: Uint8Array,
   origin = ORIGIN,
 ): Promise<Response> {
@@ -54,6 +60,7 @@ describe('Garage-backed attachment transfers', () => {
   delete dockerEnvironment.DOCKER_CONTEXT;
   let directory: string | undefined;
   let store: S3AttachmentObjectStore | undefined;
+  let profileStore: S3ProfileMediaObjects | undefined;
   let client: S3Client | undefined;
   let endpoint = '';
   let started = false;
@@ -148,6 +155,7 @@ describe('Garage-backed attachment transfers', () => {
     };
     client = new S3Client(configurationS3);
     store = new S3AttachmentObjectStore(BUCKET, configurationS3, endpoint);
+    profileStore = new S3ProfileMediaObjects(BUCKET, configurationS3, endpoint);
     await vi.waitFor(
       async () => {
         await client?.send(new HeadBucketCommand({ Bucket: BUCKET }));
@@ -173,6 +181,7 @@ describe('Garage-backed attachment transfers', () => {
 
   afterAll(() => {
     store?.onModuleDestroy();
+    profileStore?.onModuleDestroy();
     client?.destroy();
     try {
       if (started)
@@ -243,6 +252,86 @@ describe('Garage-backed attachment transfers', () => {
     expect(new Uint8Array(await download.arrayBuffer())).toEqual(PNG);
   });
 
+  it('enforces a profile image POST policy and persists only its private derivative', async () => {
+    if (profileStore === undefined || client === undefined) {
+      throw new Error('Garage was not initialized');
+    }
+    const owner = { kind: 'organization-logo', id: ORGANIZATION } as const;
+    const uploadId = '019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b10';
+    const candidateId = '019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b11';
+    const stagingKey = `profile-media/staging/${uploadId}`;
+    const candidateKey = `profile-media/candidate/${candidateId}`;
+    const leaseId = '019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b12';
+    const png = await sharp({
+      create: { width: 640, height: 640, channels: 3, background: '#31578c' },
+    })
+      .png()
+      .toBuffer();
+    const source = { owner, uploadId, contentType: 'image/png', sizeBytes: png.byteLength };
+    const expiresAt = new Date(Math.floor(Date.now() / 1_000) * 1_000 + 120_000);
+    const capability = await profileStore.sign({ ...source, expiresAt });
+    expect(capability).toMatchObject({
+      method: 'POST',
+      expiresAt: expiresAt.toISOString(),
+      fields: { key: stagingKey, 'Content-Type': 'image/png' },
+    });
+    const encodedPolicy = capability.fields.Policy;
+    if (encodedPolicy === undefined) throw new Error('The POST capability has no policy');
+    const policy: unknown = JSON.parse(Buffer.from(encodedPolicy, 'base64').toString('utf8'));
+    expect(policy).toMatchObject({
+      expiration: expiresAt.toISOString().replace('.000Z', 'Z'),
+      conditions: expect.arrayContaining([
+        { key: stagingKey },
+        { 'Content-Type': 'image/png' },
+        ['content-length-range', 1, 5 * 1024 * 1024],
+      ]) as unknown,
+    });
+    expect((await upload(capability, png)).status).toBe(204);
+
+    await expect(
+      client.send(
+        new GetObjectCommand({
+          Bucket: BUCKET,
+          Key: stagingKey,
+          IfMatch: '"incorrect-staging-etag"',
+          Range: `bytes=0-${String(png.byteLength)}`,
+        }),
+      ),
+    ).rejects.toMatchObject({ $metadata: { httpStatusCode: 412 } });
+    const pinned = await profileStore.readSource(source);
+    expect(pinned).toEqual(png);
+    if (pinned === null) throw new Error('The uploaded source could not be read');
+    const result = await new ProfileMediaImageProcessor().transform({
+      kind: owner.kind,
+      contentType: source.contentType,
+      bytes: pinned,
+      candidateId,
+    });
+    expect(result.verification.derivative).toMatchObject({ width: 512, height: 512 });
+    const candidate = { owner, uploadId, candidateId, sizeBytes: result.png.byteLength };
+    await profileStore.putCandidate({ ...candidate, png: result.png });
+    await expect(
+      client.send(new HeadObjectCommand({ Bucket: BUCKET, Key: candidateKey })),
+    ).resolves.toMatchObject({ ContentType: 'image/png', CacheControl: 'private, no-store' });
+
+    const cleanup = { owner, uploadId, generation: 1, leaseId };
+    await profileStore.erase({ ...cleanup, objectId: uploadId });
+    await expect(profileStore.readSource(source)).resolves.toBeNull();
+    await expect(profileStore.readCandidate(candidate)).resolves.toEqual(result.png);
+    await profileStore.erase({ ...cleanup, objectId: candidateId });
+    await expect(profileStore.readCandidate(candidate)).resolves.toBeNull();
+
+    const expiredSource = { ...source, uploadId: '019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b13' };
+    const shortExpiry = new Date(Math.floor(Date.now() / 1_000) * 1_000 + 3_000);
+    const expiring = await profileStore.sign({ ...expiredSource, expiresAt: shortExpiry });
+    expect(expiring.expiresAt).toBe(shortExpiry.toISOString());
+    await delay(shortExpiry.getTime() - Date.now() + 1_000);
+    const expiredUpload = await upload(expiring, png);
+    expect(expiredUpload.status).toBe(400);
+    expect(await expiredUpload.text()).toContain('Expiration date is in the past');
+    await expect(profileStore.readSource(expiredSource)).resolves.toBeNull();
+  });
+
   it('lists managed attachment keys and skips other physical objects', async () => {
     if (store === undefined || client === undefined) throw new Error('Garage was not initialized');
     const inventoryClient = client;
@@ -263,6 +352,42 @@ describe('Garage-backed attachment transfers', () => {
     expect(keys).not.toContain(unknown);
     expect(keys).not.toContain(outside);
     expect(page.next).toBeNull();
+  });
+
+  it('signs, verifies and erases an opaque intake upload while retaining its elected bytes', async () => {
+    if (store === undefined) throw new Error('Garage was not initialized');
+    const stagingKey = 'intake/019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b11';
+    const candidateKey = `org/${ORGANIZATION}/019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b12`;
+    const expiresAt = new Date(Date.now() + 180_000);
+    const capability = await store.signIntakeUpload({
+      organizationId: ORGANIZATION,
+      attachmentId: ATTACHMENT,
+      stagingKey,
+      contentType: 'image/png',
+      expiresAt,
+    });
+    expect(capability.fields.key).toBe(stagingKey);
+    expect(new Date(capability.expiresAt).getTime()).toBeLessThanOrEqual(expiresAt.getTime());
+    const response = await upload(capability, PNG);
+    expect(response.status).toBe(204);
+    expect(response.headers.get('access-control-allow-origin')).toBe(ORIGIN);
+    await expect(
+      store.copyAndVerifyIntake({ organizationId: ORGANIZATION, stagingKey, candidateKey }),
+    ).resolves.toEqual({
+      sizeBytes: PNG.length,
+      contentType: 'image/png',
+      verifiedContentType: 'image/png',
+    });
+
+    const signal = new AbortController().signal;
+    const page = await store.listIntakeObjects(null, signal);
+    expect(page.objects).toEqual([{ objectKey: stagingKey }]);
+    await store.deleteIntakeObject({ organizationId: ORGANIZATION, objectKey: stagingKey });
+    expect((await store.listIntakeObjects(null, signal)).objects).toEqual([]);
+    const signed = await store.signDownload({ objectKey: candidateKey, fileName: 'sprint-14.png' });
+    const download = await fetch(signed.url);
+    expect(download.status).toBe(200);
+    expect(new Uint8Array(await download.arrayBuffer())).toEqual(PNG);
   });
 
   it('accepts a file of 25 MiB and refuses one additional byte', async () => {

@@ -17,7 +17,8 @@ paths:
   direct NATS client.
 - Handlers deduplicate on the event id and call a use case; they never write another service's data.
 - A shape change is a new version; the old one keeps being emitted until every consumer moved.
-- Events emitted by this service: `file.uploaded`, `file.deleted`.
+- Events emitted by this service: `file.uploaded`, `file.deleted`, and `intake.attachment-verified`.
+- Intake decisions come only from the Task system actor on the published claim and release subjects.
 
 ## Review example
 

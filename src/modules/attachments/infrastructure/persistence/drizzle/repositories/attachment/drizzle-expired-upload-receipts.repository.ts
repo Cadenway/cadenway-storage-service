@@ -3,6 +3,7 @@ import { sql } from 'drizzle-orm';
 
 import type { ExpiredUploadReceipts } from '../../../../../application/ports/outbound/persistence/attachment/expired-upload-receipts.port.js';
 import { attachmentUploadClaims } from '../../schemas/attachment/attachment-upload-claims.schema.js';
+import { intakeAttachmentUploadClaims } from '../../schemas/attachment/intake-attachment-upload-claims.schema.js';
 
 /** Deletes expired upload claims across tenants without reading their encrypted responses. */
 export class DrizzleExpiredUploadReceipts implements ExpiredUploadReceipts {
@@ -32,7 +33,28 @@ export class DrizzleExpiredUploadReceipts implements ExpiredUploadReceipts {
           and receipt.key_digest = expired.key_digest
           and receipt.expires_at <= statement_timestamp()
       `);
-      return removed.rowCount ?? 0;
+      const attachmentCount = removed.rowCount ?? 0;
+      const remaining = limit - attachmentCount;
+      if (remaining === 0) return attachmentCount;
+
+      const intake = intakeAttachmentUploadClaims;
+      const removedIntake = await db.execute(sql`
+        with expired as (
+          select organization_id, publication_id, attachment_id
+          from ${intake}
+          where expires_at <= statement_timestamp()
+          order by expires_at, organization_id, publication_id, attachment_id
+          limit ${remaining}
+          for update skip locked
+        )
+        delete from ${intake} as receipt
+        using expired
+        where receipt.organization_id = expired.organization_id
+          and receipt.publication_id = expired.publication_id
+          and receipt.attachment_id = expired.attachment_id
+          and receipt.expires_at <= statement_timestamp()
+      `);
+      return attachmentCount + (removedIntake.rowCount ?? 0);
     });
   }
   // #endregion

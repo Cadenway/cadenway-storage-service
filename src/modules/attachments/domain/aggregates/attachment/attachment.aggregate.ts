@@ -1,16 +1,19 @@
 import { AttachmentError } from '../../errors/attachment/attachment.error.js';
 import type { AttachmentFact } from '../../events/attachment/attachment-fact.event.js';
+import {
+  checkedAttachmentMediaType,
+  requireAttachmentExtensionMediaType,
+  requireAttachmentVerification,
+} from '../../policies/attachment/attachment-file.policy.js';
 import type { AttachmentReservation } from '../../value-objects/attachment/attachment-reservation.value-object.js';
 import type { AttachmentSnapshot } from '../../value-objects/attachment/attachment-snapshot.value-object.js';
 import type { AttachmentVerification } from '../../value-objects/attachment/attachment-verification.value-object.js';
 
-/** Inclusive per-file limit in the attachment mockup (App.dc.html:4993). */
-export const MAX_ATTACHMENT_SIZE_BYTES = 25 * 1024 * 1024;
+export { MAX_ATTACHMENT_SIZE_BYTES } from '../../policies/attachment/attachment-file.policy.js';
 
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/u;
 const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const TASK_KEY = /^[A-Z]{2,5}-[1-9][0-9]{0,8}$/u;
-const MEDIA_TYPE = /^[!#$%&'*+\-.^_\x60|~0-9A-Za-z]+\/[!#$%&'*+\-.^_\x60|~0-9A-Za-z]+$/u;
 
 interface AttachmentChange {
   // #region Properties
@@ -22,20 +25,6 @@ interface AttachmentChange {
   // #endregion
 }
 
-/** Validates the concrete ASCII tokens from RFC 9110 and the AttachmentContentType contract. */
-function normalizedMediaType(value: string | null): string | null {
-  if (
-    value === null ||
-    value.length > 127 ||
-    !MEDIA_TYPE.test(value) ||
-    value.startsWith('*/') ||
-    value.endsWith('/*')
-  ) {
-    return null;
-  }
-  return value.toLowerCase();
-}
-
 function instant(date: Date): number {
   const milliseconds = date.getTime();
   if (!Number.isFinite(milliseconds)) throw new AttachmentError('invalid-state');
@@ -45,46 +34,33 @@ function instant(date: Date): number {
 function checkedCopy(snapshot: AttachmentSnapshot): AttachmentSnapshot {
   const id = snapshot.id.toLowerCase();
   const organizationId = snapshot.organizationId.toLowerCase();
-  const authorUserId = snapshot.authorUserId.toLowerCase();
+  const authorUserId = snapshot.authorUserId?.toLowerCase() ?? null;
   if (
     !UUID_V7.test(id) ||
     !UUID.test(organizationId) ||
-    !UUID.test(authorUserId) ||
+    (authorUserId !== null && !UUID.test(authorUserId)) ||
     !TASK_KEY.test(snapshot.taskKey)
   ) {
     throw new AttachmentError('invalid-identity');
   }
 
-  // The storage upload policy scopes object keys by organization. Staging is the only writable URL.
+  // Attachment keys are private and tenant-scoped. Intake's browser-facing staging is opaque.
   const prefix = `org/${organizationId}/`;
+  const stagingPrefix = authorUserId === null ? 'intake/' : prefix;
   if (
     snapshot.objectKey !== prefix + id ||
     snapshot.stagingObjectKey === snapshot.objectKey ||
-    !snapshot.stagingObjectKey.startsWith(prefix) ||
-    !UUID_V7.test(snapshot.stagingObjectKey.slice(prefix.length))
+    !snapshot.stagingObjectKey.startsWith(stagingPrefix) ||
+    !UUID_V7.test(snapshot.stagingObjectKey.slice(stagingPrefix.length))
   ) {
     throw new AttachmentError('invalid-object-key');
   }
 
-  // AttachmentFileName limits the original basename to 255 Unicode code points.
-  const basename = snapshot.fileName.trim();
-  if (
-    basename === '' ||
-    basename === '.' ||
-    basename === '..' ||
-    Array.from(snapshot.fileName).length > 255 ||
-    /[\\/\p{Cc}\p{Cs}]/u.test(snapshot.fileName)
-  ) {
-    throw new AttachmentError('invalid-file-name');
-  }
-  const contentType = normalizedMediaType(snapshot.contentType);
-  if (contentType === null) throw new AttachmentError('invalid-content-type');
-
-  // The signed POST upload policy requires at least one byte and at most 25 MiB.
-  if (!Number.isSafeInteger(snapshot.sizeBytes) || snapshot.sizeBytes < 1) {
-    throw new AttachmentError('invalid-size');
-  }
-  if (snapshot.sizeBytes > MAX_ATTACHMENT_SIZE_BYTES) throw new AttachmentError('file-too-large');
+  const contentType = checkedAttachmentMediaType(
+    snapshot.fileName,
+    snapshot.contentType,
+    snapshot.sizeBytes,
+  );
 
   const reservedAt = instant(snapshot.reservedAt);
   const expiresAt = instant(snapshot.expiresAt);
@@ -92,6 +68,7 @@ function checkedCopy(snapshot: AttachmentSnapshot): AttachmentSnapshot {
   const deletedAt = snapshot.deletedAt === null ? null : instant(snapshot.deletedAt);
   if (
     reservedAt >= expiresAt ||
+    (authorUserId === null && uploadedAt === null) ||
     (uploadedAt !== null && (uploadedAt < reservedAt || uploadedAt >= expiresAt)) ||
     (deletedAt !== null && deletedAt < (uploadedAt ?? reservedAt))
   ) {
@@ -171,6 +148,24 @@ export class Attachment {
     });
   }
 
+  /** Binds anonymous bytes already verified by Intake after an authoritative Task claim. */
+  public static bindIntake(
+    reservation: Omit<AttachmentReservation, 'authorUserId'>,
+    verifiedAt: Date,
+    at: Date,
+  ): AttachmentChange {
+    const attachment = Attachment.rehydrate({
+      ...reservation,
+      authorUserId: null,
+      status: 'ready',
+      version: 1,
+      uploadedAt: verifiedAt,
+      deletedAt: null,
+    });
+    instant(at);
+    return { attachment, event: attachment.fact('file.uploaded.v1', at) };
+  }
+
   /** Restores persisted state without producing a new fact. */
   public static rehydrate(snapshot: AttachmentSnapshot): Attachment {
     return new Attachment(checkedCopy(snapshot));
@@ -178,9 +173,7 @@ export class Attachment {
 
   /** Enforces the Storage upload policy's extension-derived media type before signing. */
   public requireExtensionMediaType(expected: string | null): void {
-    if (normalizedMediaType(expected) !== this.state.contentType) {
-      throw new AttachmentError('upload-metadata-mismatch');
-    }
+    requireAttachmentExtensionMediaType(expected, this.state.contentType);
   }
 
   /** Checks the UploadContentRefused byte limit before matching the reserved metadata. */
@@ -188,16 +181,7 @@ export class Attachment {
     if (this.state.status === 'ready') return { attachment: this, event: null };
     if (this.state.status === 'deleted') throw new AttachmentError('attachment-deleted');
     if (instant(at) >= instant(this.state.expiresAt)) throw new AttachmentError('upload-expired');
-    if (verification.sizeBytes > MAX_ATTACHMENT_SIZE_BYTES) {
-      throw new AttachmentError('file-too-large');
-    }
-    if (
-      verification.sizeBytes !== this.state.sizeBytes ||
-      normalizedMediaType(verification.contentType) !== this.state.contentType ||
-      normalizedMediaType(verification.verifiedContentType) !== this.state.contentType
-    ) {
-      throw new AttachmentError('upload-metadata-mismatch');
-    }
+    requireAttachmentVerification(verification, this.state.contentType, this.state.sizeBytes);
 
     const attachment = Attachment.rehydrate({
       ...this.state,
