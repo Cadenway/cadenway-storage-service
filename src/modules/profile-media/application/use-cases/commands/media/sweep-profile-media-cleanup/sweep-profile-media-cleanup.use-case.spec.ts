@@ -12,6 +12,11 @@ const lease: ProfileMediaCleanupLease = {
   generation: 1,
   leaseId: '019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b02',
 };
+const secondLease: ProfileMediaCleanupLease = {
+  ...lease,
+  objectId: '019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b03',
+  leaseId: '019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b04',
+};
 
 function fixture() {
   const store = {
@@ -67,10 +72,32 @@ describe('profile cleanup shares one bounded budget across expired and deleted r
     const error = new Error('tenant transaction unavailable');
     store.purgeOwnerReceipts.mockRejectedValueOnce(error);
     await expect(useCase.execute(8)).rejects.toBe(error);
+    expect(store.release).toHaveBeenCalledExactlyOnceWith([lease]);
     expect(store.releaseCursor).toHaveBeenCalledWith('lease');
     expect(store.advance).not.toHaveBeenCalled();
     await expect(useCase.execute(8)).resolves.toEqual([lease]);
     expect(store.advance).toHaveBeenCalledOnce();
+  });
+
+  it('preserves the failure after trying to release both the objects and the cursor', async () => {
+    const { store, useCase } = fixture();
+    const error = new Error('cursor update failed');
+    store.claimOwner.mockResolvedValueOnce([lease, secondLease]);
+    store.advance.mockRejectedValueOnce(error);
+    store.release.mockRejectedValueOnce(new Error('object release failed'));
+    store.releaseCursor.mockRejectedValueOnce(new Error('cursor release failed'));
+    await expect(useCase.execute(8)).rejects.toBe(error);
+    expect(store.release).toHaveBeenCalledExactlyOnceWith([lease, secondLease]);
+    expect(store.releaseCursor).toHaveBeenCalledExactlyOnceWith('lease');
+  });
+
+  it('releases only the cursor when claiming the owner batch fails', async () => {
+    const { store, useCase } = fixture();
+    const error = new Error('owner claim failed');
+    store.claimOwner.mockRejectedValueOnce(error);
+    await expect(useCase.execute(8)).rejects.toBe(error);
+    expect(store.release).not.toHaveBeenCalled();
+    expect(store.releaseCursor).toHaveBeenCalledExactlyOnceWith('lease');
   });
 
   it.each([0, -1, 501, 1.5])(
@@ -82,11 +109,11 @@ describe('profile cleanup shares one bounded budget across expired and deleted r
     },
   );
 
-  it('acknowledges or releases the exact object lease', async () => {
+  it('acknowledges an exact object lease or releases a batch', async () => {
     const { store, useCase } = fixture();
     await useCase.complete(lease);
-    await useCase.release(lease);
+    await useCase.release([lease, secondLease]);
     expect(store.complete).toHaveBeenCalledWith(lease);
-    expect(store.release).toHaveBeenCalledWith(lease);
+    expect(store.release).toHaveBeenCalledWith([lease, secondLease]);
   });
 });

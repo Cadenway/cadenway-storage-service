@@ -55,7 +55,7 @@ export const profileMediaMaintenanceProvider: FactoryProvider<ProfileMediaMainte
         {
           claim: (limit) => sweep.execute(limit),
           complete: (lease) => sweep.complete(lease),
-          release: (lease) => sweep.release(lease),
+          release: (leases) => sweep.release(leases),
         },
         objects,
       ),

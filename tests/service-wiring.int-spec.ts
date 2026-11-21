@@ -620,6 +620,80 @@ describe('storage-service wiring', () => {
       await scope.client.query('delete from profile_media_owners where owner_id = $1', [owner.id]);
     });
   });
+  it('releases one page of profile media leases without settling stale credentials', async () => {
+    const owner = { kind: 'avatar', id: randomUUID() } as const;
+    const uploadId = randomUUID();
+    const objectIds = Array.from({ length: 4 }, () => randomUUID());
+    const system: SystemTransactionRunner = service().get(SystemTransactionRunner);
+    await system.run(async (scope) => {
+      await scope.client.query(
+        "insert into profile_media_owners (owner_kind, owner_id) values ('avatar', $1)",
+        [owner.id],
+      );
+      await scope.client.query(
+        `insert into profile_media_uploads (owner_kind, owner_id, upload_id, status)
+         values ('avatar', $1, $2, 'retired')`,
+        [owner.id, uploadId],
+      );
+      await scope.client.query(
+        `insert into profile_media_objects
+         (owner_kind, owner_id, upload_id, object_id, role, status, cleanup_after)
+         select 'avatar', $1, $2, id, 'candidate', 'active', now() - interval '1 minute'
+         from unnest($3::uuid[]) as objects(id)`,
+        [owner.id, uploadId, objectIds],
+      );
+
+      const cleanup = new DrizzleProfileMediaCleanupTransaction(scope, owner);
+      const [first, second, stale, differentLease] = await cleanup.claim(objectIds.length);
+      if (!first || !second || !stale || !differentLease) throw new Error('Incomplete claim.');
+      await expect(
+        cleanup.release([first, { ...second, owner: { ...owner, id: randomUUID() } }]),
+      ).rejects.toThrow('Profile cleanup owner mismatch.');
+      await cleanup.release([
+        first,
+        second,
+        { ...stale, generation: stale.generation - 1 },
+        { ...differentLease, leaseId: randomUUID() },
+      ]);
+      await cleanup.complete(first);
+      await cleanup.complete(differentLease);
+      const state = await scope.db.execute<{
+        object_id: string;
+        status: string;
+        lease_id: string | null;
+        generation: number;
+        delayed: boolean;
+      }>(sql`
+        select object_id, status, lease_id, generation, cleanup_after > clock_timestamp() as delayed
+        from profile_media_objects where owner_id = ${owner.id}
+      `);
+      const byObject = new Map(state.rows.map((row) => [row.object_id, row]));
+      for (const release of [first, second]) {
+        expect(byObject.get(release.objectId)).toMatchObject({
+          status: 'fenced',
+          lease_id: null,
+          generation: release.generation + 1,
+          delayed: true,
+        });
+      }
+      expect(byObject.get(stale.objectId)).toMatchObject({
+        status: 'fenced',
+        lease_id: stale.leaseId,
+        generation: stale.generation,
+        delayed: false,
+      });
+      expect(byObject.get(differentLease.objectId)).toMatchObject({
+        status: 'cleaned',
+        lease_id: null,
+        generation: differentLease.generation + 1,
+        delayed: false,
+      });
+      await scope.client.query('delete from profile_media_objects where owner_id = $1', [owner.id]);
+      await scope.client.query('delete from profile_media_uploads where owner_id = $1', [owner.id]);
+      await scope.client.query('delete from profile_media_owners where owner_id = $1', [owner.id]);
+    });
+  });
+
   it('isolates attachment metadata, candidates, purge records, upload claims and byte entitlements by organization', async () => {
     const tenant = service().get(TenantTransactionRunner);
     const attachmentId = randomUUID();

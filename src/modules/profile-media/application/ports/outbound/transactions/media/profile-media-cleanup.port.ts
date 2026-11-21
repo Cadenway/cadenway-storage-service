@@ -9,7 +9,7 @@ export interface ProfileMediaCleanup {
   /** Completes only the generation and lease that authorized this deletion. */
   complete(lease: ProfileMediaCleanupLease): Promise<void>;
 
-  /** Releases this lease so a later worker can retry an external storage failure. */
-  release(lease: ProfileMediaCleanupLease): Promise<void>;
+  /** Releases an unfinished batch of exact cleanup leases for one owner. */
+  release(leases: readonly ProfileMediaCleanupLease[]): Promise<void>;
   // #endregion
 }

@@ -101,12 +101,12 @@ export class DrizzleProfileMediaCleanupTransaction {
 
   /** Settles only the exact lease generation after an external erasure. */
   public async complete(lease: ProfileMediaCleanupLease): Promise<void> {
-    await this.settle(lease, true);
+    await this.settle([lease], true);
   }
 
-  /** Makes a failed object eligible for a later bounded retry. */
-  public async release(lease: ProfileMediaCleanupLease): Promise<void> {
-    await this.settle(lease, false);
+  /** Releases a bounded page of exact leases for a later retry. */
+  public async release(leases: readonly ProfileMediaCleanupLease[]): Promise<void> {
+    await this.settle(leases, false);
   }
 
   /** Requeues previously cleaned physical keys observed in a later inventory pass. */
@@ -272,31 +272,38 @@ export class DrizzleProfileMediaCleanupTransaction {
     return true;
   }
 
-  private async settle(lease: ProfileMediaCleanupLease, erased: boolean): Promise<void> {
-    if (lease.owner.kind !== this.owner.kind || lease.owner.id.toLowerCase() !== this.owner.id)
+  private async settle(
+    leases: readonly ProfileMediaCleanupLease[],
+    erased: boolean,
+  ): Promise<void> {
+    if (leases.length === 0) return;
+    if (leases.length > 500) throw new RangeError('Invalid profile media cleanup page.');
+    if (
+      leases.some(
+        ({ owner }) => owner.kind !== this.owner.kind || owner.id.toLowerCase() !== this.owner.id,
+      )
+    )
       throw new Error('Profile cleanup owner mismatch.');
     const objects = profileMediaObjects;
-    await this.scope.db
-      .update(objects)
-      .set({
-        status: erased ? 'cleaned' : 'fenced',
-        leaseId: null,
-        leasedUntil: null,
-        generation: sql`${objects.generation} + 1`,
-        cleanupAfter: erased
-          ? objects.cleanupAfter
-          : sql`clock_timestamp() + interval '60 seconds'`,
-      })
-      .where(
-        and(
-          this.objectsWhere(),
-          eq(objects.uploadId, lease.uploadId),
-          eq(objects.objectId, lease.objectId),
-          eq(objects.status, 'fenced'),
-          eq(objects.leaseId, lease.leaseId),
-          eq(objects.generation, lease.generation),
-        ),
-      );
+    const keys = sql.join(
+      leases.map(
+        ({ uploadId, objectId, generation, leaseId }) =>
+          sql`(${uploadId}::uuid, ${objectId}::uuid, ${generation}::integer, ${leaseId}::uuid)`,
+      ),
+      sql`, `,
+    );
+    const cleanupAfter = erased
+      ? sql`${objects.cleanupAfter}`
+      : sql`clock_timestamp() + interval '60 seconds'`;
+    await this.scope.db.execute(sql`
+      update ${objects}
+      set status = ${erased ? 'cleaned' : 'fenced'}, lease_id = null, leased_until = null,
+          generation = ${objects.generation} + 1, cleanup_after = ${cleanupAfter}
+      from (values ${keys}) as settled(upload_id, object_id, generation, lease_id)
+      where ${this.objectsWhere()} and ${objects.status} = 'fenced'
+        and (${objects.uploadId}, ${objects.objectId}, ${objects.generation}, ${objects.leaseId})
+          = (settled.upload_id, settled.object_id, settled.generation, settled.lease_id)
+    `);
   }
 
   private ownerWhere() {

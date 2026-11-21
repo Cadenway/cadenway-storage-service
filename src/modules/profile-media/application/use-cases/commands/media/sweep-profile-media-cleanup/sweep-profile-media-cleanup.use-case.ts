@@ -16,6 +16,7 @@ export class SweepProfileMediaCleanup {
       throw new RangeError('Invalid profile cleanup page.');
     const cursor = await this.store.acquire();
     if (cursor === null) return [];
+    let leases: readonly ProfileMediaCleanupLease[] = [];
     try {
       const expired = await this.store.purgeExpiredReceipts(Math.max(1, Math.floor(limit / 4)));
       const remaining = limit - expired;
@@ -29,7 +30,7 @@ export class SweepProfileMediaCleanup {
         await this.store.advance(cursor.id, null);
         return [];
       }
-      const leases = await this.store.claimOwner(owner, remaining);
+      leases = await this.store.claimOwner(owner, remaining);
       let budget = remaining - leases.length;
       if (budget > 0) budget -= await this.store.purgeOwnerReceipts(owner, budget);
       if (budget > 0) await this.store.compactDeletedOwnerUploads(owner, budget);
@@ -37,7 +38,10 @@ export class SweepProfileMediaCleanup {
       await this.store.advance(cursor.id, JSON.stringify(owner));
       return leases;
     } catch (error) {
-      await this.store.releaseCursor(cursor.id);
+      if (leases.length > 0) {
+        await this.store.release(leases).catch(() => undefined);
+      }
+      await this.store.releaseCursor(cursor.id).catch(() => undefined);
       throw error;
     }
   }
@@ -47,9 +51,9 @@ export class SweepProfileMediaCleanup {
     return this.store.complete(lease);
   }
 
-  /** Reschedules a failed physical erasure. */
-  public release(lease: ProfileMediaCleanupLease): Promise<void> {
-    return this.store.release(lease);
+  /** Reschedules all unfinished erasures in one owner batch. */
+  public release(leases: readonly ProfileMediaCleanupLease[]): Promise<void> {
+    return this.store.release(leases);
   }
 
   private decodeOwner(value: string): ProfileMediaOwnerBinding {

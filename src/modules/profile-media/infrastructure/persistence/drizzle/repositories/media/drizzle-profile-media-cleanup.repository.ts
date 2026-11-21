@@ -71,9 +71,12 @@ export class DrizzleProfileMediaCleanup implements ProfileMediaCleanupSweep {
     return this.inOwner(lease.owner, (transaction) => transaction.complete(lease));
   }
 
-  /** Makes a failed physical deletion eligible after a backoff. */
-  public release(lease: ProfileMediaCleanupLease): Promise<void> {
-    return this.inOwner(lease.owner, (transaction) => transaction.release(lease));
+  /** Makes the unconfirmed objects of one owner eligible after a backoff. */
+  public async release(leases: readonly ProfileMediaCleanupLease[]): Promise<void> {
+    const owner = leases[0]?.owner;
+    if (owner !== undefined) {
+      await this.inOwner(owner, (transaction) => transaction.release(leases));
+    }
   }
 
   private inOwner<T>(

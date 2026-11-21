@@ -98,4 +98,5 @@ preserve the first accepted preparation.
   preparation. A deleted owner cannot access any receipt. Once their objects and receipts have
   been reclaimed, keep only the opaque upload fences needed to recognize late writes.
 - Process bounded owner batches in `storage.sweep-profile-media` and a separate leased inventory
-  page in `storage.reconcile-profile-media`. Only configured stores run the schedules.
+  page in `storage.reconcile-profile-media`. Release uncompleted object leases for retry when a
+  sweep fails or is cancelled. Only configured stores run the schedules.
