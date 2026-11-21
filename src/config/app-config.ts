@@ -63,7 +63,7 @@ const optionalObjectStorage = objectStorageInput.partial().transform((input, con
   };
 });
 
-const optionalSearchProjectionCursorSecret = z
+const optionalProjectionCursorSecret = z
   .string()
   .optional()
   .transform((value) => (value === '' ? undefined : value))
@@ -94,9 +94,10 @@ const optionalSearchProjectionCursorSecret = z
  *   them.
  * - `INTERNAL_TOKEN_AUDIENCE` and `INTERNAL_TOKEN_TRUSTED_ISSUERS`: the `aud` this service accepts
  *   and the public keys of the backends allowed to call it.
- * - `SEARCH_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS`: optional comma-separated public Ed25519 JWKs
- *   for the Search issuer when it is absent from the explicit trusted issuer map.
- * - `SEARCH_PROJECTION_CURSOR_SECRET`: optional service key for authenticating export cursors.
+ * - `SEARCH_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS` and `BILLING_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS`:
+ *   optional comma-separated public Ed25519 JWKs for issuers absent from the explicit trust map.
+ * - `SEARCH_PROJECTION_CURSOR_SECRET` and `BILLING_PROJECTION_CURSOR_SECRET`: separate optional
+ *   service keys for authenticating export cursors across replicas.
  *
  * - `S3_*`: internal and browser-facing endpoints, bucket, region and credentials are required
  *   together with `STORAGE_UPLOAD_RECEIPT_KEYS` when object storage is configured.
@@ -111,6 +112,7 @@ export type AppConfig = BaseConfig &
   InternalTokenVerifierConfig &
   z.output<typeof optionalObjectStorage> & {
     readonly SEARCH_PROJECTION_CURSOR_SECRET?: string;
+    readonly BILLING_PROJECTION_CURSOR_SECRET?: string;
   };
 
 /**
@@ -132,7 +134,9 @@ export const appConfigSchema: z.ZodType<AppConfig> = z
       ...messagingConfigShape,
       ...internalTokenVerifierConfigShape,
       SEARCH_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS: z.string().trim().optional(),
-      SEARCH_PROJECTION_CURSOR_SECRET: optionalSearchProjectionCursorSecret,
+      BILLING_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS: z.string().trim().optional(),
+      SEARCH_PROJECTION_CURSOR_SECRET: optionalProjectionCursorSecret,
+      BILLING_PROJECTION_CURSOR_SECRET: optionalProjectionCursorSecret,
     }),
     optionalObjectStorage,
   )
@@ -140,43 +144,51 @@ export const appConfigSchema: z.ZodType<AppConfig> = z
     (
       {
         SEARCH_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS: searchKeys,
-        SEARCH_PROJECTION_CURSOR_SECRET: cursorSecret,
+        BILLING_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS: billingKeys,
+        SEARCH_PROJECTION_CURSOR_SECRET: searchCursorSecret,
+        BILLING_PROJECTION_CURSOR_SECRET: billingCursorSecret,
         ...config
       },
       context,
     ): AppConfig => {
-      const result: AppConfig = {
-        ...config,
-        ...(cursorSecret === undefined ? {} : { SEARCH_PROJECTION_CURSOR_SECRET: cursorSecret }),
-      };
-      if (!searchKeys || Object.hasOwn(config.INTERNAL_TOKEN_TRUSTED_ISSUERS, 'search-service')) {
-        return result;
-      }
-
-      try {
-        const keys: unknown = JSON.parse(`[${searchKeys}]`);
-        const fallback = internalTokenVerifierConfigShape.INTERNAL_TOKEN_TRUSTED_ISSUERS.safeParse(
-          JSON.stringify({ 'search-service': keys }),
-        );
-        if (fallback.success) {
-          return {
-            ...result,
-            INTERNAL_TOKEN_TRUSTED_ISSUERS: {
-              ...fallback.data,
-              ...result.INTERNAL_TOKEN_TRUSTED_ISSUERS,
-            },
-          };
+      const trustedIssuers = { ...config.INTERNAL_TOKEN_TRUSTED_ISSUERS };
+      const fallbacks = [
+        ['search-service', 'SEARCH_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS', searchKeys],
+        ['billing-service', 'BILLING_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS', billingKeys],
+      ] as const;
+      for (const [issuer, setting, value] of fallbacks) {
+        if (!value || Object.hasOwn(trustedIssuers, issuer)) continue;
+        try {
+          const keys: unknown = JSON.parse(`[${value}]`);
+          const fallback =
+            internalTokenVerifierConfigShape.INTERNAL_TOKEN_TRUSTED_ISSUERS.safeParse(
+              JSON.stringify({ [issuer]: keys }),
+            );
+          if (fallback.success) {
+            Object.assign(trustedIssuers, fallback.data);
+            continue;
+          }
+        } catch {
+          // Report the setting without exposing its contents.
         }
-      } catch {
-        // Report the setting without exposing its contents.
+        context.addIssue({
+          code: 'custom',
+          path: [setting],
+          message: 'Expected comma-separated public Ed25519 JWKs.',
+        });
+        return z.NEVER;
       }
 
-      context.addIssue({
-        code: 'custom',
-        path: ['SEARCH_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS'],
-        message: 'Expected comma-separated public Ed25519 JWKs.',
-      });
-      return z.NEVER;
+      return {
+        ...config,
+        INTERNAL_TOKEN_TRUSTED_ISSUERS: trustedIssuers,
+        ...(searchCursorSecret === undefined
+          ? {}
+          : { SEARCH_PROJECTION_CURSOR_SECRET: searchCursorSecret }),
+        ...(billingCursorSecret === undefined
+          ? {}
+          : { BILLING_PROJECTION_CURSOR_SECRET: billingCursorSecret }),
+      };
     },
   );
 
