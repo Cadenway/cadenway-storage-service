@@ -19,6 +19,12 @@ describe('appConfigSchema', () => {
     INTERNAL_TOKEN_AUDIENCE: 'storage-service',
     INTERNAL_TOKEN_TRUSTED_ISSUERS: trustedIssuers,
   };
+  const searchKeys = ['search-current', 'search-previous'].map((kid) => ({
+    kty: 'OKP',
+    crv: 'Ed25519',
+    x: randomBytes(32).toString('base64url'),
+    kid,
+  }));
   const objectStorage: Readonly<Record<string, string>> = {
     S3_ENDPOINT: 'http://garage:3900',
     S3_PUBLIC_ENDPOINT: 'https://files.example.test',
@@ -71,6 +77,81 @@ describe('appConfigSchema', () => {
 
     expect(() => loadConfig(appConfigSchema, example)).not.toThrow();
     expect(() => loadConfig(migrationConfigSchema, example)).not.toThrow();
+  });
+
+  it('keeps Search settings optional when staged deployment passes empty variables', () => {
+    expect(
+      loadConfig(appConfigSchema, {
+        ...complete,
+        SEARCH_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS: '',
+        SEARCH_PROJECTION_CURSOR_SECRET: '',
+      }),
+    ).toStrictEqual(loadConfig(appConfigSchema, complete));
+  });
+
+  it('adds the optional Search key list without replacing another issuer', () => {
+    const expected = loadConfig(appConfigSchema, complete);
+    const config = loadConfig(appConfigSchema, {
+      ...complete,
+      SEARCH_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS: searchKeys
+        .map((key) => JSON.stringify(key))
+        .join(','),
+    });
+
+    expect(config.INTERNAL_TOKEN_TRUSTED_ISSUERS).toEqual({
+      ...expected.INTERNAL_TOKEN_TRUSTED_ISSUERS,
+      'search-service': searchKeys,
+    });
+    expect(config).not.toHaveProperty('SEARCH_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS');
+  });
+
+  it('uses the explicit Search keys without reading the fallback list', () => {
+    const expected = {
+      ...loadConfig(appConfigSchema, complete).INTERNAL_TOKEN_TRUSTED_ISSUERS,
+      'search-service': searchKeys,
+    };
+    const config = loadConfig(appConfigSchema, {
+      ...complete,
+      INTERNAL_TOKEN_TRUSTED_ISSUERS: JSON.stringify(expected),
+      SEARCH_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS: 'obsolete-fallback',
+    });
+
+    expect(config.INTERNAL_TOKEN_TRUSTED_ISSUERS).toEqual(expected);
+  });
+
+  it('refuses malformed or private Search fallback keys without echoing the supplied value', () => {
+    for (const value of [
+      'fixture-sensitive-value',
+      JSON.stringify({ ...searchKeys[0], d: 'fixture-sensitive-value' }),
+    ]) {
+      const environment = { ...complete, SEARCH_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS: value };
+
+      expect(() => loadConfig(appConfigSchema, environment)).toThrow(
+        /SEARCH_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS:/u,
+      );
+      expect(() => loadConfig(appConfigSchema, environment)).not.toThrow(
+        /fixture-sensitive-value/u,
+      );
+    }
+  });
+
+  it('accepts a canonical cursor key and rejects a different spelling of the same bytes', () => {
+    const value = randomBytes(32).toString('base64url');
+    expect(
+      loadConfig(appConfigSchema, { ...complete, SEARCH_PROJECTION_CURSOR_SECRET: value })
+        .SEARCH_PROJECTION_CURSOR_SECRET,
+    ).toBe(value);
+
+    for (const invalid of [`${value}=`, `${'A'.repeat(42)}B`, 'fixture-sensitive-value']) {
+      const environment = { ...complete, SEARCH_PROJECTION_CURSOR_SECRET: invalid };
+
+      expect(() => loadConfig(appConfigSchema, environment)).toThrow(
+        /SEARCH_PROJECTION_CURSOR_SECRET:/u,
+      );
+      expect(() => loadConfig(appConfigSchema, environment)).not.toThrow(
+        /fixture-sensitive-value/u,
+      );
+    }
   });
 
   it('validates both object storage endpoints and keeps path-style addressing opt-in', () => {

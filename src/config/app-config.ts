@@ -63,6 +63,17 @@ const optionalObjectStorage = objectStorageInput.partial().transform((input, con
   };
 });
 
+const optionalSearchProjectionCursorSecret = z
+  .string()
+  .optional()
+  .transform((value) => (value === '' ? undefined : value))
+  .refine((value) => {
+    if (value === undefined) return true;
+    if (value.length !== 43) return false;
+    const key = Buffer.from(value, 'base64url');
+    return key.length === 32 && key.toString('base64url') === value;
+  }, 'Expected 32 bytes encoded as canonical unpadded base64url.');
+
 /**
  * Type AppConfig
  *
@@ -83,6 +94,9 @@ const optionalObjectStorage = objectStorageInput.partial().transform((input, con
  *   them.
  * - `INTERNAL_TOKEN_AUDIENCE` and `INTERNAL_TOKEN_TRUSTED_ISSUERS`: the `aud` this service accepts
  *   and the public keys of the backends allowed to call it.
+ * - `SEARCH_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS`: optional comma-separated public Ed25519 JWKs
+ *   for the Search issuer when it is absent from the explicit trusted issuer map.
+ * - `SEARCH_PROJECTION_CURSOR_SECRET`: optional service key for authenticating export cursors.
  *
  * - `S3_*`: internal and browser-facing endpoints, bucket, region and credentials are required
  *   together with `STORAGE_UPLOAD_RECEIPT_KEYS` when object storage is configured.
@@ -95,7 +109,9 @@ export type AppConfig = BaseConfig &
   DatabaseConfig &
   MessagingConfig &
   InternalTokenVerifierConfig &
-  z.output<typeof optionalObjectStorage>;
+  z.output<typeof optionalObjectStorage> & {
+    readonly SEARCH_PROJECTION_CURSOR_SECRET?: string;
+  };
 
 /**
  * Constant appConfigSchema
@@ -108,15 +124,61 @@ export type AppConfig = BaseConfig &
  *
  * @type {z.ZodType<AppConfig>}
  */
-export const appConfigSchema: z.ZodType<AppConfig> = z.intersection(
-  z.object({
-    ...baseConfigShape,
-    ...databaseConfigShape,
-    ...messagingConfigShape,
-    ...internalTokenVerifierConfigShape,
-  }),
-  optionalObjectStorage,
-);
+export const appConfigSchema: z.ZodType<AppConfig> = z
+  .intersection(
+    z.object({
+      ...baseConfigShape,
+      ...databaseConfigShape,
+      ...messagingConfigShape,
+      ...internalTokenVerifierConfigShape,
+      SEARCH_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS: z.string().trim().optional(),
+      SEARCH_PROJECTION_CURSOR_SECRET: optionalSearchProjectionCursorSecret,
+    }),
+    optionalObjectStorage,
+  )
+  .transform(
+    (
+      {
+        SEARCH_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS: searchKeys,
+        SEARCH_PROJECTION_CURSOR_SECRET: cursorSecret,
+        ...config
+      },
+      context,
+    ): AppConfig => {
+      const result: AppConfig = {
+        ...config,
+        ...(cursorSecret === undefined ? {} : { SEARCH_PROJECTION_CURSOR_SECRET: cursorSecret }),
+      };
+      if (!searchKeys || Object.hasOwn(config.INTERNAL_TOKEN_TRUSTED_ISSUERS, 'search-service')) {
+        return result;
+      }
+
+      try {
+        const keys: unknown = JSON.parse(`[${searchKeys}]`);
+        const fallback = internalTokenVerifierConfigShape.INTERNAL_TOKEN_TRUSTED_ISSUERS.safeParse(
+          JSON.stringify({ 'search-service': keys }),
+        );
+        if (fallback.success) {
+          return {
+            ...result,
+            INTERNAL_TOKEN_TRUSTED_ISSUERS: {
+              ...fallback.data,
+              ...result.INTERNAL_TOKEN_TRUSTED_ISSUERS,
+            },
+          };
+        }
+      } catch {
+        // Report the setting without exposing its contents.
+      }
+
+      context.addIssue({
+        code: 'custom',
+        path: ['SEARCH_SERVICE_INTERNAL_TOKEN_PUBLIC_JWKS'],
+        message: 'Expected comma-separated public Ed25519 JWKs.',
+      });
+      return z.NEVER;
+    },
+  );
 
 /**
  * Interface MigrationConfig

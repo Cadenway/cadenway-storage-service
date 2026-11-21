@@ -57,7 +57,8 @@ Follow the [Cadenway NestJS architecture reference](https://github.com/Cadenway/
 - No access to another service's database or internal code; cross-service needs use `@cadenway/contracts` routes or events.
 - NATS only through `@cadenway/nest-messaging`; config, logs, errors, health and auth guards through `@cadenway/nest-common`.
 - Routes and event payloads come from the installed `@cadenway/contracts`; never redefine them locally.
-- The service is internal: no Traefik label, no public route; the API gateway is its only HTTP caller.
+- The service is internal, with no Traefik label or public route. The API gateway calls the
+  attachment, intake and profile routes. Search calls the two signed projection routes.
 - No sibling sources imported, no `file:` or `link:` dependency on a sibling.
 
 ## Cross-repository changes
