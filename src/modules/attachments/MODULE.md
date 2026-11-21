@@ -124,6 +124,10 @@ Search exports read the upper bound and page in an organization-scoped `REPEATAB
 ONLY` snapshot. Search resolution reads the attachment rows and their task purge fences in one
 organization-scoped query.
 
+The Billing usage reader uses a tenant snapshot and a fixed upper attachment ID. It reads the
+verified size of a ready attachment and the terminal version of a previously ready attachment.
+A task purge leaves the attachment in measured usage until Storage commits its deletion.
+
 Each lifecycle write owns its organization transaction. Finalization, deletion or purge cleanup
 commits the metadata change, the outbox fact when applicable and any pending cleanup work together.
 Calls to object storage run outside database transactions. Finalization rechecks the reservation
