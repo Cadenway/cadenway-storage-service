@@ -4,11 +4,14 @@ import { resolve } from 'node:path';
 
 import { runWithOrganizationContext } from '@cadenway/nest-common';
 import { TenantTransactionRunner } from '@cadenway/nest-common/database';
+import { sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
+import type { AttachmentUnitOfWork } from '../../../../../application/ports/outbound/transactions/attachment/attachment-unit-of-work.port.js';
+import { ApplyStorageEntitlement } from '../../../../../application/use-cases/commands/attachment/apply-storage-entitlement/apply-storage-entitlement.use-case.js';
 import { DrizzleAttachmentTransaction } from './drizzle-attachment-transaction.repository.js';
 import { DrizzleAttachmentCleanupTransaction } from './drizzle-attachment-cleanup-transaction.repository.js';
 import { DrizzleIntakeAttachmentCleanupTransaction } from './drizzle-intake-attachment-cleanup-transaction.repository.js';
@@ -38,6 +41,16 @@ function inOrganization<T>(id: string, work: () => Promise<T>): Promise<T> {
     { organizationId: id, actor: { type: 'user', id: actorId }, role: null, scopes: [] },
     work,
   );
+}
+
+function deferred<Value>() {
+  let finish: (value: Value) => void = () => {
+    throw new Error('Deferred promise has no resolver.');
+  };
+  const promise = new Promise<Value>((resolve) => {
+    finish = resolve;
+  });
+  return { promise, finish };
 }
 
 describe('storage verified byte admission', () => {
@@ -162,8 +175,8 @@ describe('storage verified byte admission', () => {
           vi.fn().mockResolvedValue(undefined),
           undefined,
         );
-        const used = await transaction.lockAndReadVerifiedBytes();
-        if (used + 10n > 10n) return false;
+        const { usedBytes } = await transaction.lockAndReadStorageAdmission();
+        if (usedBytes + 10n > 10n) return false;
         await scope.client.query(
           `insert into attachments
              (organization_id, id, task_key, author_user_id, object_key, staging_object_key,
@@ -184,8 +197,8 @@ describe('storage verified byte admission', () => {
           vi.fn().mockResolvedValue(undefined),
           undefined,
         );
-        const used = await transaction.lockAndReadVerifiedBytes();
-        if (used + 10n > 10n) return false;
+        const { usedBytes } = await transaction.lockAndReadStorageAdmission();
+        if (usedBytes + 10n > 10n) return false;
         await scope.client.query(
           `insert into intake_attachments
              (organization_id, publication_id, id, status, staging_object_key, file_name,
@@ -208,7 +221,7 @@ describe('storage verified byte admission', () => {
             vi.fn().mockResolvedValue(undefined),
             undefined,
           );
-          return transaction.lockAndReadVerifiedBytes();
+          return (await transaction.lockAndReadStorageAdmission()).usedBytes;
         }),
       );
     await expect(totals(organizationId)).resolves.toBe(10n);
@@ -226,12 +239,177 @@ describe('storage verified byte admission', () => {
               vi.fn().mockResolvedValue(undefined),
               undefined,
             );
-            return transaction.lockAndReadVerifiedBytes();
+            return transaction.lockAndReadStorageAdmission();
           },
           { isolationLevel: 'repeatable read' },
         ),
       ),
     ).rejects.toThrow('Storage quota admission requires a read committed transaction.');
+  });
+
+  it('projects a canonical Free downgrade once and preserves existing attachments and reservations', async () => {
+    const upgradedOrganization = randomUUID();
+    const freeOrganization = randomUUID();
+    const work: AttachmentUnitOfWork = {
+      run: (id, operation) =>
+        inOrganization(id, () =>
+          tenant.run((scope) =>
+            operation(
+              new DrizzleAttachmentTransaction(
+                scope,
+                id,
+                vi.fn().mockResolvedValue(undefined),
+                undefined,
+              ),
+            ),
+          ),
+        ),
+    };
+    const applyEntitlement = new ApplyStorageEntitlement(work);
+    const apply = (version: number, limitBytes: bigint, plan = 'team', seatLimit = 5) =>
+      applyEntitlement.execute({
+        organizationId: upgradedOrganization,
+        version,
+        limitBytes,
+        plan,
+        seatLimit,
+      });
+
+    await expect(apply(1, 1_999_999_999n)).resolves.toBe('invalid');
+    await expect(apply(2, 3_000_000_000n)).resolves.toBe('applied');
+    await expect(apply(2, 3_000_000_000n)).resolves.toBe('unchanged');
+    await expect(apply(2, 4_000_000_000n)).resolves.toBe('conflict');
+    await expect(apply(1, 4_000_000_000n)).resolves.toBe('stale');
+    await expect(apply(3, 2_000_000_000n)).resolves.toBe('decrease');
+    await expect(apply(3, 2_000_000_000n, 'free', 6)).resolves.toBe('invalid');
+
+    const intakeId = randomUUID();
+    await inOrganization(upgradedOrganization, () =>
+      tenant.run(async (scope) => {
+        await scope.client.query(
+          `insert into attachments
+             (organization_id, id, task_key, author_user_id, object_key, staging_object_key,
+              file_name, content_type, size_bytes, status, scan_status, version, reserved_at, expires_at)
+           select $1, uuidv7(), 'CAD-482', $2, 'ready-' || position, 'staging-' || position,
+                  'ready.txt', 'text/plain', 25000000, 'ready', 'verified', 1, now(), now()
+             from generate_series(1, 80) as position`,
+          [upgradedOrganization, actorId],
+        );
+        await scope.client.query(
+          `insert into intake_attachments
+             (organization_id, publication_id, id, status, staging_object_key, file_name,
+              content_type, size_bytes, reserved_at, expires_at, upload_expires_at, candidate_key, verified_at)
+           values ($1, $2, $3, 'verified', 'free-intake-staging', 'intake.txt',
+                   'text/plain', 7, now(), now(), now(), 'free-intake-candidate', now())`,
+          [upgradedOrganization, publicationId, intakeId],
+        );
+      }),
+    );
+
+    await expect(apply(3, 2_000_000_000n, 'free')).resolves.toBe('applied');
+    await expect(apply(3, 2_000_000_000n, 'free')).resolves.toBe('unchanged');
+    await expect(apply(3, 3_000_000_000n)).resolves.toBe('conflict');
+    await expect(apply(2, 3_000_000_000n)).resolves.toBe('stale');
+
+    await expect(
+      work.run(upgradedOrganization, (tx) => tx.lockAndReadStorageEntitlement()),
+    ).resolves.toEqual({ version: 3, limitBytes: 2_000_000_000n });
+    await expect(
+      work.run(upgradedOrganization, (tx) => tx.lockAndReadStorageAdmission()),
+    ).resolves.toEqual({ usedBytes: 2_000_000_007n, limitBytes: 2_000_000_000n });
+    const preserved = await inOrganization(upgradedOrganization, () =>
+      tenant.run((scope) =>
+        scope.client.query(
+          `select
+             (select count(*) from attachments where organization_id = $1 and status = 'ready') as ready,
+             (select count(*) from intake_attachments
+               where organization_id = $1 and id = $2 and status = 'verified') as verified`,
+          [upgradedOrganization, intakeId],
+        ),
+      ),
+    );
+    expect(preserved.rows).toEqual([{ ready: '80', verified: '1' }]);
+    await expect(
+      work.run(freeOrganization, (tx) => tx.lockAndReadStorageEntitlement()),
+    ).resolves.toEqual({ version: 0, limitBytes: 2_000_000_000n });
+    await expect(
+      inOrganization(freeOrganization, () =>
+        tenant.run((scope) =>
+          scope.client.query(
+            'insert into storage_byte_entitlements (organization_id, version, limit_bytes) values ($1, 4, 4000000000)',
+            [upgradedOrganization],
+          ),
+        ),
+      ),
+    ).rejects.toMatchObject({ code: '42501' });
+  });
+
+  it('reads the reduced byte limit after Intake waits for a concurrent entitlement update', async () => {
+    const upgradedOrganization = randomUUID();
+    const written = deferred<undefined>();
+    const commit = deferred<undefined>();
+    await inOrganization(upgradedOrganization, () =>
+      tenant.run(async (scope) => {
+        const transaction = new DrizzleAttachmentTransaction(
+          scope,
+          upgradedOrganization,
+          vi.fn().mockResolvedValue(undefined),
+          undefined,
+        );
+        await transaction.lockAndReadStorageEntitlement();
+        await transaction.saveStorageEntitlement({ version: 1, limitBytes: 3_000_000_000n });
+      }),
+    );
+    const writer = inOrganization(upgradedOrganization, () =>
+      tenant.run(async (scope) => {
+        const transaction = new DrizzleAttachmentTransaction(
+          scope,
+          upgradedOrganization,
+          vi.fn().mockResolvedValue(undefined),
+          undefined,
+        );
+        await transaction.lockAndReadStorageEntitlement();
+        await transaction.saveStorageEntitlement({ version: 2, limitBytes: 2_000_000_000n });
+        written.finish(undefined);
+        await commit.promise;
+      }),
+    );
+    await Promise.race([written.promise, writer]);
+
+    const readerPid = deferred<number>();
+    const reader = inOrganization(upgradedOrganization, () =>
+      tenant.run(async (scope) => {
+        const result = await scope.db.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+        const pid = result.rows[0]?.pid;
+        if (pid === undefined) throw new Error('The Intake session has no backend PID.');
+        readerPid.finish(pid);
+        const transaction = new DrizzleIntakeAttachmentTransaction(
+          scope,
+          upgradedOrganization,
+          vi.fn().mockResolvedValue(undefined),
+          vi.fn().mockResolvedValue(undefined),
+          undefined,
+        );
+        return transaction.lockAndReadStorageAdmission();
+      }),
+    );
+    try {
+      const pid = await Promise.race([readerPid.promise, reader.then(() => undefined)]);
+      await vi.waitFor(
+        async () => {
+          const result = await pool?.query(
+            "select 1 from pg_locks where pid = $1 and locktype = 'advisory' and not granted",
+            [pid],
+          );
+          expect(result?.rowCount).toBe(1);
+        },
+        { timeout: 3_000 },
+      );
+    } finally {
+      commit.finish(undefined);
+      await writer;
+    }
+    await expect(reader).resolves.toEqual({ usedBytes: 0n, limitBytes: 2_000_000_000n });
   });
 
   it('counts an expired verified Intake reservation until its terminal release', async () => {
@@ -258,7 +436,7 @@ describe('storage verified byte admission', () => {
             vi.fn().mockResolvedValue(undefined),
             undefined,
           );
-          return transaction.lockAndReadVerifiedBytes();
+          return (await transaction.lockAndReadStorageAdmission()).usedBytes;
         }),
       );
     await expect(currentBytes()).resolves.toBe(7n);

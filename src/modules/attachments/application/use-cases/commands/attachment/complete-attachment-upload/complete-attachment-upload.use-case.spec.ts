@@ -35,14 +35,15 @@ function fixture(
   initial = reservation(),
   clock = () => now,
   storageLimit: bigint | null = null,
+  newId = () => Promise.resolve(candidateId),
 ): {
   readonly useCase: CompleteAttachmentUpload;
   readonly registerCandidate: ReturnType<typeof vi.fn<AttachmentTransaction['registerCandidate']>>;
   readonly scheduleCandidateCleanup: ReturnType<
     typeof vi.fn<AttachmentTransaction['scheduleCandidateCleanup']>
   >;
-  readonly lockAndReadVerifiedBytes: ReturnType<
-    typeof vi.fn<AttachmentTransaction['lockAndReadVerifiedBytes']>
+  readonly lockAndReadStorageAdmission: ReturnType<
+    typeof vi.fn<AttachmentTransaction['lockAndReadStorageAdmission']>
   >;
   readonly electCandidate: ReturnType<typeof vi.fn<AttachmentTransaction['electCandidate']>>;
   readonly appendFact: ReturnType<typeof vi.fn<AttachmentTransaction['appendFact']>>;
@@ -61,9 +62,9 @@ function fixture(
     return Promise.resolve(true);
   });
   const appendFact = vi.fn<AttachmentTransaction['appendFact']>();
-  const lockAndReadVerifiedBytes = vi
-    .fn<AttachmentTransaction['lockAndReadVerifiedBytes']>()
-    .mockResolvedValue(0n);
+  const lockAndReadStorageAdmission = vi
+    .fn<AttachmentTransaction['lockAndReadStorageAdmission']>()
+    .mockResolvedValue({ usedBytes: 0n, limitBytes: storageLimit ?? 2_000_000_000n });
   const registerTaskPurge = vi.fn<AttachmentTransaction['registerTaskPurge']>();
   const lockAttachment = vi.fn<AttachmentTransaction['lockAttachment']>(() =>
     Promise.resolve(attachment),
@@ -79,7 +80,9 @@ function fixture(
     releaseUploadClaim: vi.fn(),
     registerCandidate,
     scheduleCandidateCleanup,
-    lockAndReadVerifiedBytes,
+    lockAndReadStorageAdmission,
+    lockAndReadStorageEntitlement: vi.fn(),
+    saveStorageEntitlement: vi.fn(),
     electCandidate,
     deleteAttachment: vi.fn(),
     appendFact,
@@ -107,7 +110,7 @@ function fixture(
   return {
     registerCandidate,
     scheduleCandidateCleanup,
-    lockAndReadVerifiedBytes,
+    lockAndReadStorageAdmission,
     electCandidate,
     appendFact,
     lockAttachment,
@@ -119,8 +122,8 @@ function fixture(
     useCase: new CompleteAttachmentUpload(
       work,
       objects,
-      { now: clock, newId: () => Promise.resolve(candidateId) },
-      storageLimit,
+      { now: clock, newId },
+      storageLimit !== null,
     ),
   };
 }
@@ -132,7 +135,7 @@ describe('CompleteAttachmentUpload', () => {
     const {
       useCase,
       registerCandidate,
-      lockAndReadVerifiedBytes,
+      lockAndReadStorageAdmission,
       electCandidate,
       appendFact,
       copy,
@@ -146,20 +149,27 @@ describe('CompleteAttachmentUpload', () => {
       copy.mock.invocationCallOrder[0] ?? 0,
     );
     expect(electCandidate).toHaveBeenCalledTimes(1);
-    expect(lockAndReadVerifiedBytes).toHaveBeenCalledOnce();
+    expect(lockAndReadStorageAdmission).toHaveBeenCalledOnce();
     expect(appendFact).toHaveBeenCalledTimes(1);
   });
 
-  it('refuses verified bytes over quota before election and leaves the upload retryable', async () => {
+  it('schedules cleanup for a copy refused by quota and accepts a retry after the ceiling increases', async () => {
+    const retryCandidateId = '019a7004-3b2c-7d4e-8f5a-6b7c8d9e0f18';
+    const newId = vi
+      .fn<() => Promise<string>>()
+      .mockResolvedValueOnce(candidateId)
+      .mockResolvedValueOnce(retryCandidateId);
     const {
       useCase,
-      lockAndReadVerifiedBytes,
+      lockAndReadStorageAdmission,
       scheduleCandidateCleanup,
       electCandidate,
       appendFact,
       committed,
-    } = fixture(reservation(), () => now, 20n);
-    lockAndReadVerifiedBytes.mockResolvedValueOnce(1n).mockResolvedValueOnce(0n);
+    } = fixture(reservation(), () => now, 20n, newId);
+    lockAndReadStorageAdmission
+      .mockResolvedValueOnce({ usedBytes: 1n, limitBytes: 20n })
+      .mockResolvedValueOnce({ usedBytes: 1n, limitBytes: 21n });
     await expect(useCase.execute(input)).rejects.toMatchObject({
       reason: 'storage-quota-exceeded',
     });
@@ -170,19 +180,26 @@ describe('CompleteAttachmentUpload', () => {
       `org/${organizationId}/${candidateId}`,
     );
     expect(committed).toHaveBeenCalledTimes(2);
+    expect(scheduleCandidateCleanup.mock.invocationCallOrder[0]).toBeLessThan(
+      committed.mock.invocationCallOrder[1] ?? 0,
+    );
     await expect(useCase.execute(input)).resolves.toMatchObject({
       attachment: { id: attachmentId },
     });
-    expect(electCandidate).toHaveBeenCalledOnce();
+    expect(electCandidate).toHaveBeenCalledExactlyOnceWith(
+      expect.any(Attachment) as unknown,
+      `org/${organizationId}/${retryCandidateId}`,
+    );
+    expect(scheduleCandidateCleanup).toHaveBeenCalledOnce();
     expect(appendFact).toHaveBeenCalledOnce();
   });
 
   it('does not acquire the quota lock when enforcement is disabled', async () => {
-    const { useCase, lockAndReadVerifiedBytes } = fixture();
+    const { useCase, lockAndReadStorageAdmission } = fixture();
     await expect(useCase.execute(input)).resolves.toMatchObject({
       attachment: { id: attachmentId },
     });
-    expect(lockAndReadVerifiedBytes).not.toHaveBeenCalled();
+    expect(lockAndReadStorageAdmission).not.toHaveBeenCalled();
   });
 
   it('rejects metadata that does not describe the copied candidate without electing or publishing', async () => {

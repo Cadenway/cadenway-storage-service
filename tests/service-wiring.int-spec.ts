@@ -4,6 +4,7 @@ import { EventEmitter, once } from 'node:events';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 
+import type { SubscriptionChangedV1 } from '@cadenway/contracts/events/billing-service';
 import {
   createApplication,
   InternalTokenSigner,
@@ -23,6 +24,7 @@ import { and, eq, sql } from 'drizzle-orm';
 import pg from 'pg';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 import { AppModule } from '../src/app.module.js';
 import { appConfigSchema } from '../src/config/app-config.js';
@@ -113,6 +115,7 @@ const attachmentTables = [
   'intake_attachment_candidates',
   'intake_attachment_upload_claims',
   'intake_attachments',
+  'storage_byte_entitlements',
 ] as const;
 
 const profileTables = [
@@ -323,6 +326,7 @@ describe('storage-service wiring', () => {
     vi.stubEnv('NATS_URL', `nats://127.0.0.1:${natsHostPort}`);
     vi.stubEnv('NATS_USER', 'storage');
     vi.stubEnv('NATS_PASSWORD', 'storage');
+    vi.stubEnv('STORAGE_BILLING_ENTITLEMENTS_ENABLED', 'true');
     vi.stubEnv('INTERNAL_TOKEN_AUDIENCE', 'storage-service');
     vi.stubEnv(
       'INTERNAL_TOKEN_TRUSTED_ISSUERS',
@@ -382,7 +386,7 @@ describe('storage-service wiring', () => {
         tableowner: 'storage_migrator',
       })),
     );
-    expect(journal.rows).toEqual([{ applied: 4 }]);
+    expect(journal.rows).toEqual([{ applied: 5 }]);
   });
 
   it('applies nothing when the migrator runs again', async () => {
@@ -391,7 +395,7 @@ describe('storage-service wiring', () => {
     const journal = await migrator.query<{ applied: number }>(
       'select count(*)::int as applied from drizzle.__drizzle_migrations',
     );
-    expect(journal.rows).toEqual([{ applied: 4 }]);
+    expect(journal.rows).toEqual([{ applied: 5 }]);
   });
 
   it('provisions all scheduled cleanup queues with the migrator', async () => {
@@ -616,7 +620,7 @@ describe('storage-service wiring', () => {
       await scope.client.query('delete from profile_media_owners where owner_id = $1', [owner.id]);
     });
   });
-  it('isolates attachment metadata, candidates, purge records and upload claims by organization', async () => {
+  it('isolates attachment metadata, candidates, purge records, upload claims and byte entitlements by organization', async () => {
     const tenant = service().get(TenantTransactionRunner);
     const attachmentId = randomUUID();
     const objectKey = `org/${atelierNordId}/${attachmentId}`;
@@ -671,6 +675,11 @@ describe('storage-service wiring', () => {
           (organization_id, publication_id, attachment_id, fingerprint, expires_at)
           values ($1, $2, $3, 'test-fingerprint', now() + interval '1 day')`,
         values: [atelierNordId, publicationId, attachmentId],
+      },
+      {
+        sql: `insert into storage_byte_entitlements (organization_id, version, limit_bytes)
+          values ($1, 1, 3000000000)`,
+        values: [atelierNordId],
       },
     ];
 
@@ -2148,7 +2157,7 @@ describe('storage-service wiring', () => {
     const journal = await migrator.query<{ applied: number }>(
       'select count(*)::int as applied from drizzle.__drizzle_migrations',
     );
-    expect(journal.rows).toEqual([{ applied: 4 }]);
+    expect(journal.rows).toEqual([{ applied: 5 }]);
   });
 
   it('runs the outbox relay and marks an acknowledged event as sent', async () => {
@@ -2184,6 +2193,140 @@ describe('storage-service wiring', () => {
     expect(response.status).toBe(200);
   });
 
+  it('applies Billing snapshots once and retains the latest byte ceiling across reordered delivery', async () => {
+    const tenant = service().get(TenantTransactionRunner);
+    const organizationId = randomUUID();
+    const consumer = 'storage-service__apply-storage-byte-entitlement';
+    const first: SubscriptionChangedV1 = {
+      id: randomUUID(),
+      occurredAt: '2026-11-21T14:08:00.000Z',
+      organizationId,
+      actor: { type: 'system', id: 'billing-service' },
+      version: 2,
+      plan: 'team',
+      seatLimit: 18,
+      storageByteLimit: 100_000_000_000,
+    };
+    const publish = (event: SubscriptionChangedV1): void => {
+      expect(
+        brokerAccepts(
+          { NATS_USER: 'billing', NATS_PASSWORD: 'billing' },
+          '--inbox-prefix',
+          '_INBOX.billing',
+          'pub',
+          'evt.subscription.changed.v1',
+          JSON.stringify(event),
+        ),
+      ).toBe(true);
+    };
+    const processed = async (eventId: string): Promise<void> => {
+      await vi.waitFor(
+        async () => {
+          const result = await runWithOrganizationContext(memberOf(organizationId), () =>
+            tenant.run((tx) =>
+              tx.client.query(
+                'select event_id from processed_events where consumer = $1 and event_id = $2',
+                [consumer, eventId],
+              ),
+            ),
+          );
+          expect(result.rows).toHaveLength(1);
+        },
+        { timeout: 10_000, interval: 50 },
+      );
+    };
+    const current = async (): Promise<readonly unknown[]> =>
+      runWithOrganizationContext(memberOf(organizationId), () =>
+        tenant.run(async (tx) => {
+          const result = await tx.client.query(
+            'select version::text, limit_bytes::text from storage_byte_entitlements where organization_id = $1',
+            [organizationId],
+          );
+          return result.rows;
+        }),
+      );
+    const redeliveries = (): number => {
+      const info = compose(
+        'exec',
+        '-T',
+        '--env',
+        'NATS_USER=storage',
+        '--env',
+        'NATS_PASSWORD=storage',
+        'nats-streams',
+        'nats',
+        '--timeout',
+        '2s',
+        '--inbox-prefix',
+        '_INBOX.storage',
+        'consumer',
+        'info',
+        'EVENTS',
+        consumer,
+        '--json',
+      );
+      const parsed: unknown = JSON.parse(info);
+      return z.object({ num_redelivered: z.number() }).parse(parsed).num_redelivered;
+    };
+
+    publish(first);
+    await processed(first.id);
+    expect(await current()).toEqual([{ version: '2', limit_bytes: '100000000000' }]);
+
+    const older = { ...first, id: randomUUID(), version: 1, storageByteLimit: 50_000_000_000 };
+    publish(older);
+    await processed(older.id);
+    expect(await current()).toEqual([{ version: '2', limit_bytes: '100000000000' }]);
+
+    publish(first);
+    const equal = { ...first, id: randomUUID() };
+    publish(equal);
+    await processed(equal.id);
+    expect(await current()).toEqual([{ version: '2', limit_bytes: '100000000000' }]);
+
+    const retry = {
+      ...first,
+      id: randomUUID(),
+      version: 3,
+      storageByteLimit: 120_000_000_000,
+      actor: { type: 'system' as const, id: 'task-service' },
+    };
+    publish(retry);
+    await vi.waitFor(
+      () => {
+        expect(redeliveries()).toBeGreaterThan(0);
+      },
+      {
+        timeout: 10_000,
+        interval: 100,
+      },
+    );
+    const rejected = await runWithOrganizationContext(memberOf(organizationId), () =>
+      tenant.run((tx) =>
+        tx.client.query(
+          'select event_id from processed_events where consumer = $1 and event_id = $2',
+          [consumer, retry.id],
+        ),
+      ),
+    );
+    expect(rejected.rows).toEqual([]);
+    expect(await current()).toEqual([{ version: '2', limit_bytes: '100000000000' }]);
+    const next = { ...retry, id: randomUUID(), actor: first.actor };
+    publish(next);
+    await processed(next.id);
+    expect(await current()).toEqual([{ version: '3', limit_bytes: '120000000000' }]);
+
+    const other = await runWithOrganizationContext(memberOf(otherOrganizationId), () =>
+      tenant.run((tx) =>
+        tx.client.query(
+          'select organization_id from storage_byte_entitlements where organization_id = $1',
+          [organizationId],
+        ),
+      ),
+    );
+    expect(other.rows).toEqual([]);
+  }, 30_000);
+
   it('runs against a broker that enforces the permissions of cadenway-ops', () => {
     const storage = { NATS_USER: 'storage', NATS_PASSWORD: 'storage' };
 
@@ -2199,6 +2342,7 @@ describe('storage-service wiring', () => {
       'delete-avatar-owner',
       'apply-organization-logo-change',
       'abandon-organization-logo-upload',
+      'apply-storage-byte-entitlement',
     ]) {
       expect(
         brokerAccepts(
@@ -2223,6 +2367,7 @@ describe('storage-service wiring', () => {
       false,
     );
     expect(brokerAccepts(storage, 'pub', 'evt.task.wiring-probe', 'refused')).toBe(false);
+    expect(brokerAccepts(storage, 'pub', 'evt.subscription.changed.v1', 'refused')).toBe(false);
     expect(brokerAccepts({ NATS_USER: '', NATS_PASSWORD: '' }, 'pub', 'evt.file.x', 'x')).toBe(
       false,
     );

@@ -114,10 +114,8 @@ export type AppConfig = BaseConfig &
     readonly SEARCH_PROJECTION_CURSOR_SECRET?: string;
     readonly BILLING_PROJECTION_CURSOR_SECRET?: string;
     readonly STORAGE_BYTE_QUOTA_ENABLED: boolean;
+    readonly STORAGE_BILLING_ENTITLEMENTS_ENABLED: boolean;
   };
-
-/** The Free plan's verified storage capacity in bytes. */
-export const freeStorageByteLimit = 2_000_000_000n;
 
 /**
  * Constant appConfigSchema
@@ -142,6 +140,10 @@ export const appConfigSchema: z.ZodType<AppConfig> = z
       SEARCH_PROJECTION_CURSOR_SECRET: optionalProjectionCursorSecret,
       BILLING_PROJECTION_CURSOR_SECRET: optionalProjectionCursorSecret,
       STORAGE_BYTE_QUOTA_ENABLED: z
+        .enum(['true', 'false'])
+        .default('false')
+        .transform((value) => value === 'true'),
+      STORAGE_BILLING_ENTITLEMENTS_ENABLED: z
         .enum(['true', 'false'])
         .default('false')
         .transform((value) => value === 'true'),

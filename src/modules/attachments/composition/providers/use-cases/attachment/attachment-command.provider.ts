@@ -2,10 +2,11 @@ import { CONFIG } from '@cadenway/nest-common';
 import { TenantTransactionRunner } from '@cadenway/nest-common/database';
 import type { FactoryProvider } from '@nestjs/common';
 
-import { freeStorageByteLimit, type AppConfig } from '../../../../../../config/app-config.js';
+import type { AppConfig } from '../../../../../../config/app-config.js';
 import type { AttachmentObjectStore } from '../../../../application/ports/outbound/object-storage/attachment/attachment-object-store.port.js';
 import type { AttachmentRuntime } from '../../../../application/ports/outbound/runtime/attachment/attachment-runtime.port.js';
 import type { AttachmentUnitOfWork } from '../../../../application/ports/outbound/transactions/attachment/attachment-unit-of-work.port.js';
+import { ApplyStorageEntitlement } from '../../../../application/use-cases/commands/attachment/apply-storage-entitlement/apply-storage-entitlement.use-case.js';
 import { CompleteAttachmentUpload } from '../../../../application/use-cases/commands/attachment/complete-attachment-upload/complete-attachment-upload.use-case.js';
 import { DeleteAttachment } from '../../../../application/use-cases/commands/attachment/delete-attachment/delete-attachment.use-case.js';
 import { RecordTaskPurge } from '../../../../application/use-cases/commands/attachment/record-task-purge/record-task-purge.use-case.js';
@@ -42,12 +43,13 @@ export const attachmentCommandProviders: readonly FactoryProvider[] = [
       runtime: AttachmentRuntime,
       config: AppConfig,
     ): CompleteAttachmentUpload =>
-      new CompleteAttachmentUpload(
-        work,
-        objects,
-        runtime,
-        config.STORAGE_BYTE_QUOTA_ENABLED ? freeStorageByteLimit : null,
-      ),
+      new CompleteAttachmentUpload(work, objects, runtime, config.STORAGE_BYTE_QUOTA_ENABLED),
+  },
+  {
+    provide: ApplyStorageEntitlement,
+    inject: [ATTACHMENT_UNIT_OF_WORK],
+    useFactory: (work: AttachmentUnitOfWork): ApplyStorageEntitlement =>
+      new ApplyStorageEntitlement(work),
   },
   {
     provide: DeleteAttachment,

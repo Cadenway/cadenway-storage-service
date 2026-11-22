@@ -63,6 +63,7 @@ describe('appConfigSchema', () => {
       NATS_USER: 'storage',
       NATS_PASSWORD: 'storage',
       STORAGE_BYTE_QUOTA_ENABLED: false,
+      STORAGE_BILLING_ENTITLEMENTS_ENABLED: false,
       INTERNAL_TOKEN_AUDIENCE: 'storage-service',
       INTERNAL_TOKEN_TRUSTED_ISSUERS: {
         'api-gateway': [

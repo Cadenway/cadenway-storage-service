@@ -29,6 +29,13 @@
       "when": 1795207513593,
       "tag": "0003_profile_media",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1795277107047,
+      "tag": "0004_storage_byte_entitlements",
+      "breakpoints": true
     }
   ]
 }

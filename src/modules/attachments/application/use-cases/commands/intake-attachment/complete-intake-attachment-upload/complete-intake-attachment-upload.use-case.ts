@@ -13,7 +13,7 @@ export class CompleteIntakeAttachmentUpload {
     private readonly work: IntakeAttachmentUnitOfWork,
     private readonly objects: IntakeAttachmentObjectStore,
     private readonly runtime: AttachmentRuntime,
-    private readonly storageLimit: bigint | null = null,
+    private readonly storageQuotaEnabled = false,
   ) {}
   // #endregion
 
@@ -58,14 +58,12 @@ export class CompleteIntakeAttachmentUpload {
       current.requireVerificationWindow(now);
       if (verification === null) throw new AttachmentRefusal('upload-not-ready');
       const change = current.verify(candidateKey, verification, now);
-      if (
-        change.event !== null &&
-        this.storageLimit !== null &&
-        (await store.lockAndReadVerifiedBytes()) + BigInt(verification.sizeBytes) >
-          this.storageLimit
-      ) {
-        await store.scheduleCandidateCleanup(input, candidateKey);
-        return { quotaExceeded: true as const };
+      if (change.event !== null && this.storageQuotaEnabled) {
+        const { usedBytes, limitBytes } = await store.lockAndReadStorageAdmission();
+        if (usedBytes + BigInt(verification.sizeBytes) > limitBytes) {
+          await store.scheduleCandidateCleanup(input, candidateKey);
+          return { quotaExceeded: true as const };
+        }
       }
       if (
         change.event !== null &&

@@ -63,9 +63,9 @@ function fixture() {
         expect(transaction).toBe(true);
         return Promise.resolve();
       }),
-    lockAndReadVerifiedBytes: vi
-      .fn<IntakeAttachmentTransaction['lockAndReadVerifiedBytes']>()
-      .mockResolvedValue(0n),
+    lockAndReadStorageAdmission: vi
+      .fn<IntakeAttachmentTransaction['lockAndReadStorageAdmission']>()
+      .mockResolvedValue({ usedBytes: 0n, limitBytes: 20n }),
     electVerified: vi.fn<IntakeAttachmentTransaction['electVerified']>().mockResolvedValue(true),
     lockTask: vi.fn<IntakeAttachmentTransaction['lockTask']>().mockResolvedValue(false),
     saveDecision: vi.fn<IntakeAttachmentTransaction['saveDecision']>().mockResolvedValue(undefined),
@@ -140,11 +140,11 @@ describe('Anonymous intake attachment transactions', () => {
   it('copies outside transactions, then elects the candidate and its verification fact together', async () => {
     const f = fixture();
     f.runtime.newId.mockResolvedValue(candidateId);
-    const operation = new CompleteIntakeAttachmentUpload(f.work, f.objects, f.runtime, 20n);
+    const operation = new CompleteIntakeAttachmentUpload(f.work, f.objects, f.runtime, true);
 
     await expect(operation.execute(scope)).resolves.toEqual({ id: scope.attachmentId });
     expect(f.store.registerCandidate).toHaveBeenCalledBefore(f.objects.copyAndVerifyIntake);
-    expect(f.store.lockAndReadVerifiedBytes).toHaveBeenCalledOnce();
+    expect(f.store.lockAndReadStorageAdmission).toHaveBeenCalledOnce();
     expect(f.store.electVerified).toHaveBeenCalledExactlyOnceWith(
       scope,
       expect.objectContaining({
@@ -158,10 +158,14 @@ describe('Anonymous intake attachment transactions', () => {
     );
   });
 
-  it('refuses excess verified bytes without electing or publishing, then allows a retry', async () => {
+  it('schedules cleanup for a copy refused by quota and accepts a retry after the ceiling increases', async () => {
     const f = fixture();
-    f.store.lockAndReadVerifiedBytes.mockResolvedValueOnce(1n).mockResolvedValueOnce(0n);
-    const operation = new CompleteIntakeAttachmentUpload(f.work, f.objects, f.runtime, 20n);
+    const retryCandidateId = '019a7006-7a8b-7c9d-8e0f-1a2b3c4d5e06';
+    f.runtime.newId.mockResolvedValueOnce(candidateId).mockResolvedValueOnce(retryCandidateId);
+    f.store.lockAndReadStorageAdmission
+      .mockResolvedValueOnce({ usedBytes: 1n, limitBytes: 20n })
+      .mockResolvedValueOnce({ usedBytes: 1n, limitBytes: 21n });
+    const operation = new CompleteIntakeAttachmentUpload(f.work, f.objects, f.runtime, true);
 
     await expect(operation.execute(scope)).rejects.toMatchObject({
       reason: 'storage-quota-exceeded',
@@ -169,18 +173,22 @@ describe('Anonymous intake attachment transactions', () => {
     expect(f.store.electVerified).not.toHaveBeenCalled();
     expect(f.store.scheduleCandidateCleanup).toHaveBeenCalledExactlyOnceWith(
       scope,
-      `org/${scope.organizationId}/${stagingId}`,
+      `org/${scope.organizationId}/${candidateId}`,
     );
     expect(f.committed).toHaveBeenCalledTimes(2);
     await expect(operation.execute(scope)).resolves.toEqual({ id: scope.attachmentId });
     expect(f.store.electVerified).toHaveBeenCalledOnce();
+    expect(f.store.electVerified.mock.calls[0]?.[2]).toBe(
+      `org/${scope.organizationId}/${retryCandidateId}`,
+    );
+    expect(f.store.scheduleCandidateCleanup).toHaveBeenCalledOnce();
   });
 
   it('does not acquire the quota lock when enforcement is disabled', async () => {
     const f = fixture();
     const operation = new CompleteIntakeAttachmentUpload(f.work, f.objects, f.runtime);
     await expect(operation.execute(scope)).resolves.toEqual({ id: scope.attachmentId });
-    expect(f.store.lockAndReadVerifiedBytes).not.toHaveBeenCalled();
+    expect(f.store.lockAndReadStorageAdmission).not.toHaveBeenCalled();
   });
 
   it('refuses a pending upload at the exact signed expiry while its draft remains open', async () => {
@@ -227,7 +235,7 @@ describe('Anonymous intake attachment transactions', () => {
     await expect(operation.execute(scope)).resolves.toEqual({ id: scope.attachmentId });
     expect(f.objects.copyAndVerifyIntake).not.toHaveBeenCalled();
     expect(f.store.electVerified).not.toHaveBeenCalled();
-    expect(f.store.lockAndReadVerifiedBytes).not.toHaveBeenCalled();
+    expect(f.store.lockAndReadStorageAdmission).not.toHaveBeenCalled();
   });
 
   it('leaves a release tombstone for a reservation that has not arrived and never attaches a purged task', async () => {

@@ -5,10 +5,12 @@ import { createHash } from 'node:crypto';
 
 import type { AttachmentActor } from '../../../../../application/models/attachment/attachment-actor.model.js';
 import type { AttachmentTransaction } from '../../../../../application/models/attachment/attachment-transaction.model.js';
+import type { StorageQuotaAdmission } from '../../../../../application/models/attachment/storage-quota-admission.model.js';
 import type { UploadCapability } from '../../../../../application/models/attachment/upload-capability.model.js';
 import type { UploadClaimConflict } from '../../../../../application/models/attachment/upload-claim-conflict.model.js';
 import { Attachment } from '../../../../../domain/aggregates/attachment/attachment.aggregate.js';
 import type { AttachmentFact } from '../../../../../domain/events/attachment/attachment-fact.event.js';
+import type { StorageEntitlement } from '../../../../../domain/value-objects/attachment/storage-entitlement.value-object.js';
 import type { UploadReceiptCodec } from '../../../../adapters/crypto/upload-receipt.codec.js';
 import { AttachmentObjectStorageError } from '../../../../../application/ports/outbound/object-storage/attachment/attachment-object-store.port.js';
 import { attachmentCandidates } from '../../schemas/attachment/attachment-candidates.schema.js';
@@ -63,10 +65,21 @@ export class DrizzleAttachmentTransaction implements AttachmentTransaction {
   // #endregion
 
   // #region Methods
-  /** Locks quota admission and reads the current tenant usage in a subsequent statement. */
-  public async lockAndReadVerifiedBytes(): Promise<bigint> {
+  /** Locks quota admission before measuring current usage and reading its limit. */
+  public async lockAndReadStorageAdmission(): Promise<StorageQuotaAdmission> {
     await this.quota.lock();
-    return this.quota.usedBytes();
+    return this.quota.admission();
+  }
+
+  /** Locks quota admission before reading the current Billing projection. */
+  public async lockAndReadStorageEntitlement(): Promise<StorageEntitlement> {
+    await this.quota.lock();
+    return this.quota.entitlement();
+  }
+
+  /** Saves a verified Billing projection under the same quota lock. */
+  public saveStorageEntitlement(entitlement: StorageEntitlement): Promise<void> {
+    return this.quota.saveEntitlement(entitlement);
   }
 
   /** Creates a lockable row even for tasks with no prior attachments. */

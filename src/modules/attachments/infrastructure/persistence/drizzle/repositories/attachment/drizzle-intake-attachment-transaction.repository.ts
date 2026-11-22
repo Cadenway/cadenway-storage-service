@@ -2,6 +2,7 @@ import type { TransactionScope } from '@cadenway/nest-common/database';
 import { createHash } from 'node:crypto';
 import { and, eq, gt, isNull, lte, sql } from 'drizzle-orm';
 
+import type { StorageQuotaAdmission } from '../../../../../application/models/attachment/storage-quota-admission.model.js';
 import type { IntakeAttachmentIdentity } from '../../../../../application/models/intake-attachment/intake-attachment-identity.model.js';
 import type { IntakeAttachmentTransaction } from '../../../../../application/models/intake-attachment/intake-attachment-transaction.model.js';
 import type { IntakeSigningClaim } from '../../../../../application/models/intake-attachment/intake-signing-claim.model.js';
@@ -141,10 +142,10 @@ export class DrizzleIntakeAttachmentTransaction implements IntakeAttachmentTrans
   // #endregion
 
   // #region Methods
-  /** Locks quota admission and reads the current tenant usage in a subsequent statement. */
-  public async lockAndReadVerifiedBytes(): Promise<bigint> {
+  /** Locks quota admission before measuring the current usage and reading its limit. */
+  public async lockAndReadStorageAdmission(): Promise<StorageQuotaAdmission> {
     await this.quota.lock();
-    return this.quota.usedBytes();
+    return this.quota.admission();
   }
 
   /** Serializes even a missing allocation against release-before-start. */

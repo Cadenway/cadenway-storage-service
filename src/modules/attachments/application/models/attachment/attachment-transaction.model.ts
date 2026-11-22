@@ -1,6 +1,8 @@
 import type { Attachment } from '../../../domain/aggregates/attachment/attachment.aggregate.js';
 import type { AttachmentFact } from '../../../domain/events/attachment/attachment-fact.event.js';
+import type { StorageEntitlement } from '../../../domain/value-objects/attachment/storage-entitlement.value-object.js';
 import type { AttachmentActor } from './attachment-actor.model.js';
+import type { StorageQuotaAdmission } from './storage-quota-admission.model.js';
 import type { UploadCapability } from './upload-capability.model.js';
 import type { UploadClaimConflict } from './upload-claim-conflict.model.js';
 
@@ -59,8 +61,14 @@ export interface AttachmentTransaction {
   /** Schedules cleanup of this still-active candidate without affecting another completion. */
   scheduleCandidateCleanup(attachmentId: string, candidateKey: string): Promise<void>;
 
-  /** Locks the tenant quota and reads ready and reserved bytes in this transaction. */
-  lockAndReadVerifiedBytes(): Promise<bigint>;
+  /** Locks the tenant quota and reads ready bytes, reserved bytes and the effective limit. */
+  lockAndReadStorageAdmission(): Promise<StorageQuotaAdmission>;
+
+  /** Locks the tenant quota before reading its current entitlement version and limit. */
+  lockAndReadStorageEntitlement(): Promise<StorageEntitlement>;
+
+  /** Persists an accepted version and limit while holding the tenant quota lock. */
+  saveStorageEntitlement(entitlement: StorageEntitlement): Promise<void>;
 
   /** Elects a still-active candidate, persists ready metadata and protects the winner from cleanup. */
   electCandidate(attachment: Attachment, candidateKey: string): Promise<boolean>;
