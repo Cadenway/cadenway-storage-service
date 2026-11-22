@@ -116,8 +116,9 @@ system actor on its `file.uploaded.v1` fact. A release suppresses a later start 
 The broker grants publication of `evt.subscription.changed.v1` to Billing. The
 `storage-service__apply-storage-byte-entitlement` durable checks the Billing system actor and the
 delivery tenant, replays retained snapshots, and commits the processed ID and entitlement within
-one tenant transaction. Older snapshots and exact replays are acknowledged. Conflicting,
-decreasing or invalid snapshots follow the kit's retry and dead-letter policy. Enable
+one tenant transaction. Older snapshots and exact replays are acknowledged. Conflicting and
+invalid snapshots or decreases outside the canonical Free return follow the kit's retry and
+dead-letter policy. Enable
 `STORAGE_BILLING_ENTITLEMENTS_ENABLED` after the broker permissions are deployed. Snapshot
 consumption can start before enabling `STORAGE_BYTE_QUOTA_ENABLED`.
 
@@ -152,9 +153,12 @@ A task purge leaves the attachment in measured usage until Storage commits its d
 
 Byte admission and the internal `ApplyStorageEntitlement` command share the tenant storage quota
 lock under `READ COMMITTED`. Admissions read usage and the effective limit in a single statement
-after the lock. Billing entitlement versions only advance with an equal or higher limit. A replay
-of the current version and limit succeeds without a write. An older version, conflicting replay
-or lower limit leaves the current projection in effect.
+after the lock. A newer Billing snapshot can lower the ceiling to the Free baseline when it
+declares the Free plan, five seats and 2,000,000,000 bytes. Its version is recorded even if an
+intermediate snapshot was missed. A replay of the current version and limit succeeds without a
+write. An older version, conflicting replay or another decrease leaves the projection in effect.
+After applying a lower limit, admission refuses additional bytes that would exceed the ceiling.
+Existing files and verified Intake reservations keep their lifecycle and count toward usage.
 
 Each lifecycle write owns its organization transaction. Finalization, deletion or purge cleanup
 commits the metadata change, the outbox fact when applicable and any pending cleanup work together.

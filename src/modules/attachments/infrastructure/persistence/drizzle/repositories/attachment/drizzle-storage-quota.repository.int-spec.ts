@@ -247,7 +247,7 @@ describe('storage verified byte admission', () => {
     ).rejects.toThrow('Storage quota admission requires a read committed transaction.');
   });
 
-  it('projects only newer limits for the tenant without changing the Free baseline of others', async () => {
+  it('projects a canonical Free downgrade once and preserves existing attachments and reservations', async () => {
     const upgradedOrganization = randomUUID();
     const freeOrganization = randomUUID();
     const work: AttachmentUnitOfWork = {
@@ -266,23 +266,69 @@ describe('storage verified byte admission', () => {
         ),
     };
     const applyEntitlement = new ApplyStorageEntitlement(work);
-    const apply = (version: number, limitBytes: bigint) =>
-      applyEntitlement.execute({ organizationId: upgradedOrganization, version, limitBytes });
+    const apply = (version: number, limitBytes: bigint, plan = 'team', seatLimit = 5) =>
+      applyEntitlement.execute({
+        organizationId: upgradedOrganization,
+        version,
+        limitBytes,
+        plan,
+        seatLimit,
+      });
 
-    await expect(apply(1, 1_999_999_999n)).resolves.toBe('decrease');
+    await expect(apply(1, 1_999_999_999n)).resolves.toBe('invalid');
     await expect(apply(2, 3_000_000_000n)).resolves.toBe('applied');
     await expect(apply(2, 3_000_000_000n)).resolves.toBe('unchanged');
     await expect(apply(2, 4_000_000_000n)).resolves.toBe('conflict');
     await expect(apply(1, 4_000_000_000n)).resolves.toBe('stale');
     await expect(apply(3, 2_000_000_000n)).resolves.toBe('decrease');
-    await expect(apply(3, 3_000_000_000n)).resolves.toBe('applied');
+    await expect(apply(3, 2_000_000_000n, 'free', 6)).resolves.toBe('invalid');
+
+    const intakeId = randomUUID();
+    await inOrganization(upgradedOrganization, () =>
+      tenant.run(async (scope) => {
+        await scope.client.query(
+          `insert into attachments
+             (organization_id, id, task_key, author_user_id, object_key, staging_object_key,
+              file_name, content_type, size_bytes, status, scan_status, version, reserved_at, expires_at)
+           select $1, uuidv7(), 'CAD-482', $2, 'ready-' || position, 'staging-' || position,
+                  'ready.txt', 'text/plain', 25000000, 'ready', 'verified', 1, now(), now()
+             from generate_series(1, 80) as position`,
+          [upgradedOrganization, actorId],
+        );
+        await scope.client.query(
+          `insert into intake_attachments
+             (organization_id, publication_id, id, status, staging_object_key, file_name,
+              content_type, size_bytes, reserved_at, expires_at, upload_expires_at, candidate_key, verified_at)
+           values ($1, $2, $3, 'verified', 'free-intake-staging', 'intake.txt',
+                   'text/plain', 7, now(), now(), now(), 'free-intake-candidate', now())`,
+          [upgradedOrganization, publicationId, intakeId],
+        );
+      }),
+    );
+
+    await expect(apply(3, 2_000_000_000n, 'free')).resolves.toBe('applied');
+    await expect(apply(3, 2_000_000_000n, 'free')).resolves.toBe('unchanged');
+    await expect(apply(3, 3_000_000_000n)).resolves.toBe('conflict');
+    await expect(apply(2, 3_000_000_000n)).resolves.toBe('stale');
 
     await expect(
       work.run(upgradedOrganization, (tx) => tx.lockAndReadStorageEntitlement()),
-    ).resolves.toEqual({ version: 3, limitBytes: 3_000_000_000n });
+    ).resolves.toEqual({ version: 3, limitBytes: 2_000_000_000n });
     await expect(
       work.run(upgradedOrganization, (tx) => tx.lockAndReadStorageAdmission()),
-    ).resolves.toEqual({ usedBytes: 0n, limitBytes: 3_000_000_000n });
+    ).resolves.toEqual({ usedBytes: 2_000_000_007n, limitBytes: 2_000_000_000n });
+    const preserved = await inOrganization(upgradedOrganization, () =>
+      tenant.run((scope) =>
+        scope.client.query(
+          `select
+             (select count(*) from attachments where organization_id = $1 and status = 'ready') as ready,
+             (select count(*) from intake_attachments
+               where organization_id = $1 and id = $2 and status = 'verified') as verified`,
+          [upgradedOrganization, intakeId],
+        ),
+      ),
+    );
+    expect(preserved.rows).toEqual([{ ready: '80', verified: '1' }]);
     await expect(
       work.run(freeOrganization, (tx) => tx.lockAndReadStorageEntitlement()),
     ).resolves.toEqual({ version: 0, limitBytes: 2_000_000_000n });
@@ -298,11 +344,11 @@ describe('storage verified byte admission', () => {
     ).rejects.toMatchObject({ code: '42501' });
   });
 
-  it('reads the committed byte limit after Intake waits for a concurrent entitlement update', async () => {
+  it('reads the reduced byte limit after Intake waits for a concurrent entitlement update', async () => {
     const upgradedOrganization = randomUUID();
     const written = deferred<undefined>();
     const commit = deferred<undefined>();
-    const writer = inOrganization(upgradedOrganization, () =>
+    await inOrganization(upgradedOrganization, () =>
       tenant.run(async (scope) => {
         const transaction = new DrizzleAttachmentTransaction(
           scope,
@@ -312,6 +358,18 @@ describe('storage verified byte admission', () => {
         );
         await transaction.lockAndReadStorageEntitlement();
         await transaction.saveStorageEntitlement({ version: 1, limitBytes: 3_000_000_000n });
+      }),
+    );
+    const writer = inOrganization(upgradedOrganization, () =>
+      tenant.run(async (scope) => {
+        const transaction = new DrizzleAttachmentTransaction(
+          scope,
+          upgradedOrganization,
+          vi.fn().mockResolvedValue(undefined),
+          undefined,
+        );
+        await transaction.lockAndReadStorageEntitlement();
+        await transaction.saveStorageEntitlement({ version: 2, limitBytes: 2_000_000_000n });
         written.finish(undefined);
         await commit.promise;
       }),
@@ -351,7 +409,7 @@ describe('storage verified byte admission', () => {
       commit.finish(undefined);
       await writer;
     }
-    await expect(reader).resolves.toEqual({ usedBytes: 0n, limitBytes: 3_000_000_000n });
+    await expect(reader).resolves.toEqual({ usedBytes: 0n, limitBytes: 2_000_000_000n });
   });
 
   it('counts an expired verified Intake reservation until its terminal release', async () => {

@@ -11,18 +11,13 @@ export class ApplyStorageEntitlement {
   // #endregion
 
   // #region Methods
-  /** Advances only a newer Billing version that preserves or raises the byte ceiling. */
-  public execute({
-    organizationId,
-    version,
-    limitBytes,
-  }: ApplyStorageEntitlementInput): Promise<ApplyStorageEntitlementOutput> {
-    const proposed = { version, limitBytes };
-    return this.work.run(organizationId, async (store) => {
+  /** Advances a newer Billing limit, including a verified return to the Free baseline. */
+  public execute(input: ApplyStorageEntitlementInput): Promise<ApplyStorageEntitlementOutput> {
+    return this.work.run(input.organizationId, async (store) => {
       const current = await store.lockAndReadStorageEntitlement();
-      const decision = classifyStorageEntitlement(current, proposed);
+      const decision = classifyStorageEntitlement(current, input);
       if (decision !== 'newer') return decision;
-      await store.saveStorageEntitlement(proposed);
+      await store.saveStorageEntitlement({ version: input.version, limitBytes: input.limitBytes });
       return 'applied';
     });
   }
