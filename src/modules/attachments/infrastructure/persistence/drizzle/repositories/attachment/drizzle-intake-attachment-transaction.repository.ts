@@ -324,6 +324,24 @@ export class DrizzleIntakeAttachmentTransaction implements IntakeAttachmentTrans
     });
   }
 
+  /** Schedules only this rejected unelected copy for the next cleanup sweep. */
+  public async scheduleCandidateCleanup(
+    identity: IntakeAttachmentIdentity,
+    candidateKey: string,
+  ): Promise<void> {
+    this.requireLock(identity);
+    await this.scope.db
+      .update(intakeAttachmentCandidates)
+      .set({ cleanupAfter: sql`now()` })
+      .where(
+        and(
+          this.matchCandidate(identity),
+          eq(intakeAttachmentCandidates.objectKey, candidateKey),
+          eq(intakeAttachmentCandidates.status, 'active'),
+        ),
+      );
+  }
+
   /** Elects one unfenced candidate and appends its verification fact atomically. */
   public async electVerified(
     identity: IntakeAttachmentIdentity,

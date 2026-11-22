@@ -58,6 +58,9 @@ export interface AttachmentTransaction {
    */
   registerCandidate(attachmentId: string, candidateKey: string, cleanupAfter: Date): Promise<void>;
 
+  /** Schedules cleanup of this still-active candidate without affecting another completion. */
+  scheduleCandidateCleanup(attachmentId: string, candidateKey: string): Promise<void>;
+
   /** Locks the tenant quota and reads ready bytes, reserved bytes and the effective limit. */
   lockAndReadStorageAdmission(): Promise<StorageQuotaAdmission>;
 

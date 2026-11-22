@@ -55,6 +55,7 @@ function fixture() {
       .mockResolvedValue({ kind: 'completed' }),
     releaseUploadClaim: vi.fn<AttachmentTransaction['releaseUploadClaim']>(),
     registerCandidate: vi.fn<AttachmentTransaction['registerCandidate']>(),
+    scheduleCandidateCleanup: vi.fn<AttachmentTransaction['scheduleCandidateCleanup']>(),
     lockAndReadStorageAdmission: vi.fn<AttachmentTransaction['lockAndReadStorageAdmission']>(),
     lockAndReadStorageEntitlement: vi.fn(),
     saveStorageEntitlement: vi.fn(),
