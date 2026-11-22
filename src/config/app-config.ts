@@ -8,6 +8,9 @@ import { z } from 'zod';
 
 import { uploadReceiptKeyringSchema } from './upload-receipt-keyring.js';
 
+/** Browser POST target when the local one-shot relay is enabled. */
+export const uploadTransferPath = '/internal/v1/upload-transfers';
+
 const storageEndpoint = z
   .url({ protocol: /^https?$/u, error: 'Expected an HTTP or HTTPS object storage endpoint.' })
   .refine((value) => {
@@ -19,6 +22,17 @@ const storageValue = z
   .string()
   .refine((value) => value.trim().length > 0, 'Expected a non-empty object storage setting.');
 
+const localUploadTransferUrl = storageEndpoint.refine((value) => {
+  const url = new URL(value);
+  return (
+    (url.hostname === '127.0.0.1' ||
+      url.hostname === '[::1]' ||
+      url.hostname === 'localhost' ||
+      url.hostname.endsWith('.localhost')) &&
+    url.pathname === uploadTransferPath
+  );
+}, 'Expected the local upload transfer endpoint.');
+
 const objectStorageInput = z.object({
   S3_ENDPOINT: storageEndpoint,
   S3_PUBLIC_ENDPOINT: storageEndpoint,
@@ -27,11 +41,17 @@ const objectStorageInput = z.object({
   S3_ACCESS_KEY_ID: storageValue,
   S3_SECRET_ACCESS_KEY: storageValue,
   S3_FORCE_PATH_STYLE: z.enum(['true', 'false']).optional(),
+  S3_ERASE_TRANSIENT_VERSIONS: z.enum(['true', 'false']).optional(),
+  STORAGE_UPLOAD_TRANSFER_URL: z.preprocess(
+    (value) => (value === '' ? undefined : value),
+    localUploadTransferUrl.optional(),
+  ),
   STORAGE_UPLOAD_RECEIPT_KEYS: z.string(),
 });
 
 const optionalObjectStorage = objectStorageInput.partial().transform((input, context) => {
-  if (Object.keys(input).length === 0) return {};
+  const provided: unknown[] = Object.values(input);
+  if (provided.every((value) => value === undefined)) return {};
 
   const result = objectStorageInput.safeParse(input);
   if (!result.success) {
@@ -58,6 +78,8 @@ const optionalObjectStorage = objectStorageInput.partial().transform((input, con
       accessKeyId: result.data.S3_ACCESS_KEY_ID,
       secretAccessKey: result.data.S3_SECRET_ACCESS_KEY,
       forcePathStyle: result.data.S3_FORCE_PATH_STYLE === 'true',
+      eraseTransientVersions: result.data.S3_ERASE_TRANSIENT_VERSIONS === 'true',
+      uploadTransferUrl: result.data.STORAGE_UPLOAD_TRANSFER_URL,
       receiptKeys: receiptKeys.data,
     }),
   };
@@ -101,7 +123,9 @@ const optionalProjectionCursorSecret = z
  *
  * - `S3_*`: internal and browser-facing endpoints, bucket, region and credentials are required
  *   together with `STORAGE_UPLOAD_RECEIPT_KEYS` when object storage is configured.
- *   `S3_FORCE_PATH_STYLE` defaults to false.
+ *   `S3_FORCE_PATH_STYLE` and `S3_ERASE_TRANSIENT_VERSIONS` default to false. Enable transient
+ *   version erasure for a versioned object bucket with version-list and version-delete access.
+ *   `STORAGE_UPLOAD_TRANSFER_URL` optionally enables a one-shot upload relay on loopback.
  *   Without any storage settings, the service runs with signed transfers unavailable.
  *
  * `OTEL_EXPORTER_OTLP_ENDPOINT` is read by `telemetry.ts` before the application exists.

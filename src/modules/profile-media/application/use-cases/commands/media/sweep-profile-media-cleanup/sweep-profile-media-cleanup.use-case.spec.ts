@@ -11,6 +11,7 @@ const lease: ProfileMediaCleanupLease = {
   objectId: '019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b01',
   generation: 1,
   leaseId: '019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b02',
+  retention: 'transient',
 };
 const secondLease: ProfileMediaCleanupLease = {
   ...lease,

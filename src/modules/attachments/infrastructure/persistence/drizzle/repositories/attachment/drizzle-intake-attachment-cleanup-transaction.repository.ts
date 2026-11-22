@@ -86,7 +86,11 @@ export class DrizzleIntakeAttachmentCleanupTransaction implements IntakeAttachme
       ),
       sql`, `,
     );
-    const fenced = await this.scope.db.execute<{ objectKey: string; generation: number }>(sql`
+    const fenced = await this.scope.db.execute<{
+      objectKey: string;
+      generation: number;
+      retention: FencedCleanupObject['retention'];
+    }>(sql`
       update ${table}
       set status = 'fenced',
           cleanup_after = greatest(clock_timestamp(), ${cutoff.toISOString()}::timestamptz)
@@ -100,7 +104,8 @@ export class DrizzleIntakeAttachmentCleanupTransaction implements IntakeAttachme
         and ${table.status} in ('staging', 'active', 'fenced')
         and ${table.cleanupAfter} = scanned.cleanup_after
         and ${table.cleanupGeneration} = scanned.generation
-      returning ${table.objectKey} as "objectKey", ${table.cleanupGeneration} as "generation"
+      returning ${table.objectKey} as "objectKey", ${table.cleanupGeneration} as "generation",
+        ${table.retention}
     `);
     return {
       objects: fenced.rows,

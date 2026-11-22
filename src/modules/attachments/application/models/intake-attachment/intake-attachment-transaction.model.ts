@@ -36,8 +36,8 @@ export interface IntakeAttachmentTransaction {
   /** Schedules cleanup of this still-active candidate without affecting another completion. */
   scheduleCandidateCleanup(identity: IntakeAttachmentIdentity, candidateKey: string): Promise<void>;
 
-  /** Locks the tenant quota and reads ready bytes, reserved bytes and the effective limit. */
-  lockAndReadStorageAdmission(): Promise<StorageQuotaAdmission>;
+  /** Locks quota and optionally counts storage authorized by live staging capabilities. */
+  lockAndReadStorageAdmission(includeStaging?: boolean): Promise<StorageQuotaAdmission>;
 
   /** Elects and pins an unfenced candidate, persisting verification and its outbox fact atomically. */
   electVerified(

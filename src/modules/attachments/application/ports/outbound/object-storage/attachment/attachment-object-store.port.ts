@@ -5,12 +5,18 @@ export { AttachmentObjectStorageError } from '../../../../models/attachment/atta
 
 /** External transfer operations, called outside the database transaction. */
 export interface AttachmentObjectStore {
+  // #region Properties
+  /** Whether one-shot transfers require a staging erasure grace period. */
+  readonly oneShotUploads?: boolean;
+  // #endregion
+
   // #region Methods
   /** Signs a five-minute constrained multipart POST for exactly the supplied staging key. */
   signUpload(input: {
     readonly attachmentId: string;
     readonly stagingKey: string;
     readonly contentType: string;
+    readonly sizeBytes: number;
     readonly expiresAt: Date;
   }): Promise<UploadCapability>;
 
@@ -18,7 +24,11 @@ export interface AttachmentObjectStore {
   copyAndVerify(input: {
     readonly stagingKey: string;
     readonly candidateKey: string;
+    readonly sizeBytes: number;
   }): Promise<AttachmentVerification | null>;
+
+  /** Protects a candidate's history in object storage before publishing its verified bytes. */
+  retainCandidate(candidateKey: string): Promise<void>;
 
   /** Signs a download whose content disposition is attachment with a safe filename. */
   signDownload(input: {

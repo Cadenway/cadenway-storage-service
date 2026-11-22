@@ -82,6 +82,7 @@ export class StartAttachmentUpload {
       attachmentId: attachment.snapshot.id,
       stagingKey: attachment.snapshot.stagingObjectKey,
       contentType: attachment.snapshot.contentType,
+      sizeBytes: attachment.snapshot.sizeBytes,
       expiresAt,
     });
     const signedExpiry = new Date(capability.expiresAt);
@@ -110,7 +111,11 @@ export class StartAttachmentUpload {
         );
         if (result.kind !== 'completed') return resolveUploadClaim(result);
       }
-      await store.insertReservation(signedReservation);
+      const { usedBytes, limitBytes } = await store.lockAndReadStorageAdmission(true);
+      if (usedBytes + BigInt(signedReservation.snapshot.sizeBytes) > limitBytes) {
+        throw new AttachmentRefusal('storage-quota-exceeded');
+      }
+      await store.insertReservation(signedReservation, this.objects.oneShotUploads);
       if (this.runtime.now() >= signedExpiry)
         throw new Error('The upload capability expired before reservation.');
       return { capability, replayed: false };

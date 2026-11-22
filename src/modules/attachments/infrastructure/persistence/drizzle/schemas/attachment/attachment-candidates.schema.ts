@@ -12,6 +12,7 @@ import {
   uuid,
 } from 'drizzle-orm/pg-core';
 
+import type { AttachmentObjectRetention } from '../../../../../application/models/attachment/attachment-object-retention.model.js';
 import { attachments } from './attachments.schema.js';
 
 /** Durable object candidates and cleanup fences, including delayed-copy tombstones. */
@@ -24,6 +25,7 @@ export const attachmentCandidates = pgTable(
     status: text('status').notNull().default('active'),
     cleanupAfter: timestamp('cleanup_after', { withTimezone: true, precision: 3 }).notNull(),
     cleanupGeneration: integer('cleanup_generation').notNull().default(0),
+    retention: text('retention').$type<AttachmentObjectRetention>().notNull().default('preserve'),
   },
   (table) => [
     primaryKey({
@@ -43,6 +45,10 @@ export const attachmentCandidates = pgTable(
       sql`${table.status} in ('staging', 'active', 'elected', 'fenced', 'cleaned')`,
     ),
     check('attachment_candidates_cleanup_generation_check', sql`${table.cleanupGeneration} >= 0`),
+    check(
+      'attachment_candidates_elected_history_check',
+      sql`${table.retention} in ('preserve', 'candidate', 'transient') and (${table.status} <> 'elected' or ${table.retention} = 'preserve')`,
+    ),
     organizationPolicy('attachment_candidates_organization_isolation'),
   ],
 );

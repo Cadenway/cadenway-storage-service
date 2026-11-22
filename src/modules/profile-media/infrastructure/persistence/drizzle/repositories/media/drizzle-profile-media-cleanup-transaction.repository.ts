@@ -89,12 +89,14 @@ export class DrizzleProfileMediaCleanupTransaction {
       objectId: string;
       generation: number;
       leaseId: string;
+      retention: 'preserve' | 'candidate' | 'transient';
     }>(sql`
       update ${objects} set status = 'fenced', generation = ${objects.generation} + 1,
         lease_id = uuidv7(), leased_until = clock_timestamp() + interval '15 minutes'
       from (values ${keys}) as selected(upload_id, object_id)
       where ${this.objectsWhere()} and ${objects.uploadId} = selected.upload_id and ${objects.objectId} = selected.object_id
-      returning ${objects.uploadId} as "uploadId", ${objects.objectId} as "objectId", ${objects.generation} as generation, ${objects.leaseId} as "leaseId"
+      returning ${objects.uploadId} as "uploadId", ${objects.objectId} as "objectId", ${objects.generation} as generation, ${objects.leaseId} as "leaseId",
+        case when ${objects.role} = 'staging' then 'transient' else ${objects.retention} end as retention
     `);
     return result.rows.map((row) => ({ owner: this.owner, ...row }));
   }

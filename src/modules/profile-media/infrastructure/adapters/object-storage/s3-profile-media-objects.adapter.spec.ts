@@ -24,7 +24,7 @@ type Handler = S3Client['config']['requestHandler'];
 type Response = Awaited<ReturnType<Handler['handle']>>;
 const objects: S3ProfileMediaObjects[] = [];
 
-function fixture() {
+function fixture(eraseTransientVersions = false) {
   const handle = vi.fn<Handler['handle']>();
   const storage = new S3ProfileMediaObjects(
     'profile-test',
@@ -36,6 +36,7 @@ function fixture() {
       requestHandler: { handle, destroy: vi.fn() },
     },
     'https://files.example.test',
+    eraseTransientVersions,
   );
   objects.push(storage);
   return { handle, storage };
@@ -75,7 +76,7 @@ afterEach(() => {
 });
 
 describe('S3ProfileMediaObjects', () => {
-  it('signs only the opaque staging key, exact MIME and owner expiry', async () => {
+  it('signs only the opaque staging key, exact MIME, declared size and owner expiry', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-11-20T08:08:12.621Z'));
     const { handle, storage } = fixture();
@@ -95,7 +96,7 @@ describe('S3ProfileMediaObjects', () => {
     expect(policy).toMatchObject({
       expiration: '2026-11-20T08:13:12Z',
       conditions: expect.arrayContaining([
-        ['content-length-range', 1, 5 * 1024 * 1024],
+        ['content-length-range', 1, source.sizeBytes],
         { 'Content-Type': source.contentType },
         { key: staging },
       ]) as unknown,
@@ -237,10 +238,65 @@ describe('S3ProfileMediaObjects', () => {
       objectId: uploadId,
       generation: 1,
       leaseId: candidateId,
+      retention: 'transient',
     });
     expect(handle.mock.calls[1]?.[0]).toMatchObject({
       method: 'DELETE',
       path: `/profile-test/${staging}`,
+    });
+  });
+
+  it('advances inventory through staging, current and hidden candidates, and late proofs', async () => {
+    const { handle, storage } = fixture(true);
+    const xml = (body: string) => response(200, {}, Buffer.from(body));
+    handle
+      .mockResolvedValueOnce(
+        xml(
+          `<ListVersionsResult>
+          <IsTruncated>true</IsTruncated><NextKeyMarker>${staging}</NextKeyMarker>
+          <NextVersionIdMarker>version-a</NextVersionIdMarker>
+          <DeleteMarker><Key>${staging}</Key><VersionId>version-a</VersionId></DeleteMarker>
+        </ListVersionsResult>`,
+        ),
+      )
+      .mockResolvedValueOnce(
+        xml(
+          `<ListVersionsResult>
+          <IsTruncated>false</IsTruncated>
+          <Version><Key>${staging}</Key><VersionId>version-b</VersionId></Version>
+          <Version><Key>${candidate}</Key><VersionId>version-c</VersionId><IsLatest>true</IsLatest></Version>
+          <DeleteMarker><Key>${candidate}</Key><VersionId>version-d</VersionId><IsLatest>false</IsLatest></DeleteMarker>
+          <DeleteMarker><Key>${candidate}-hidden</Key><VersionId>version-e</VersionId><IsLatest>true</IsLatest></DeleteMarker>
+        </ListVersionsResult>`,
+        ),
+      )
+      .mockResolvedValueOnce(
+        xml(
+          `<ListVersionsResult><IsTruncated>false</IsTruncated>
+          <Version><Key>attachment-restore-pins/${candidate}</Key><VersionId>version-c</VersionId></Version>
+        </ListVersionsResult>`,
+        ),
+      );
+    const signal = AbortSignal.timeout(10_000);
+    const first = await storage.listProfileMediaObjects('legacy-provider-token', signal);
+    expect(first.objects).toEqual([{ role: 'staging', objectId: uploadId }]);
+    expect(handle.mock.calls[0]?.[0]).toMatchObject({
+      query: { prefix: 'profile-media/', versions: '', 'max-keys': '500' },
+    });
+    const second = await storage.listProfileMediaObjects(first.next, signal);
+    expect(second.objects).toEqual([
+      { role: 'staging', objectId: uploadId },
+      { role: 'candidate', objectId: candidateId },
+    ]);
+    expect(handle.mock.calls[1]?.[0]).toMatchObject({
+      query: { 'key-marker': staging, 'version-id-marker': 'version-a' },
+    });
+    await expect(storage.listProfileMediaObjects(second.next, signal)).resolves.toEqual({
+      objects: [{ role: 'candidate', objectId: candidateId, transientOnly: true }],
+      next: null,
+    });
+    expect(handle.mock.calls[2]?.[0]).toMatchObject({
+      query: { prefix: 'attachment-restore-pins/profile-media/candidate/' },
     });
   });
 });

@@ -1,0 +1,2 @@
+ALTER TABLE "profile_media_objects" ADD COLUMN "retention" text DEFAULT 'preserve' NOT NULL;--> statement-breakpoint
+ALTER TABLE "profile_media_objects" ADD CONSTRAINT "profile_media_objects_retention_check" CHECK ("profile_media_objects"."retention" in ('preserve','candidate','transient') and ("profile_media_objects"."status" <> 'elected' or "profile_media_objects"."retention" = 'preserve'));

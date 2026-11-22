@@ -1,8 +1,9 @@
 import type { TransactionScope } from '@cadenway/nest-common/database';
-import { and, eq, gt, isNull, lte, sql } from 'drizzle-orm';
+import { and, eq, gt, inArray, isNull, lte, sql } from 'drizzle-orm';
 import type { SQL } from 'drizzle-orm';
 import { createHash } from 'node:crypto';
 
+import { stagingTransferCleanupAfter } from '../../../../../../../infrastructure/object-storage/upload-transfer-ticket.js';
 import type { AttachmentActor } from '../../../../../application/models/attachment/attachment-actor.model.js';
 import type { AttachmentTransaction } from '../../../../../application/models/attachment/attachment-transaction.model.js';
 import type { StorageQuotaAdmission } from '../../../../../application/models/attachment/storage-quota-admission.model.js';
@@ -66,9 +67,9 @@ export class DrizzleAttachmentTransaction implements AttachmentTransaction {
 
   // #region Methods
   /** Locks quota admission before measuring current usage and reading its limit. */
-  public async lockAndReadStorageAdmission(): Promise<StorageQuotaAdmission> {
+  public async lockAndReadStorageAdmission(includeStaging = false): Promise<StorageQuotaAdmission> {
     await this.quota.lock();
-    return this.quota.admission();
+    return this.quota.admission(includeStaging);
   }
 
   /** Locks quota admission before reading the current Billing projection. */
@@ -149,7 +150,7 @@ export class DrizzleAttachmentTransaction implements AttachmentTransaction {
   }
 
   /** Persists the reservation and its future staging cleanup atomically. */
-  public async insertReservation(attachment: Attachment): Promise<void> {
+  public async insertReservation(attachment: Attachment, oneShotUpload = false): Promise<void> {
     const state = attachment.snapshot;
     if (state.organizationId !== this.organizationId.toLowerCase())
       throw new Error('Attachment tenant mismatch.');
@@ -159,7 +160,8 @@ export class DrizzleAttachmentTransaction implements AttachmentTransaction {
       attachmentId: state.id,
       objectKey: state.stagingObjectKey,
       status: 'staging',
-      cleanupAfter: state.expiresAt,
+      retention: 'transient',
+      cleanupAfter: oneShotUpload ? stagingTransferCleanupAfter(state.expiresAt) : state.expiresAt,
     });
   }
 
@@ -314,20 +316,27 @@ export class DrizzleAttachmentTransaction implements AttachmentTransaction {
       objectKey: candidateKey,
       cleanupAfter,
       status: 'active',
+      retention: 'candidate',
     });
   }
 
-  /** Schedules only this rejected unelected copy for the next cleanup sweep. */
+  /** Permanently rejects this attempt even if an expiry sweep already fenced it. */
   public async scheduleCandidateCleanup(attachmentId: string, candidateKey: string): Promise<void> {
     await this.scope.db
       .update(attachmentCandidates)
-      .set({ cleanupAfter: sql`now()` })
+      .set({
+        status: 'fenced',
+        retention: 'transient',
+        cleanupAfter: sql`now()`,
+        cleanupGeneration: sql`${attachmentCandidates.cleanupGeneration} + 1`,
+      })
       .where(
         and(
           eq(attachmentCandidates.organizationId, this.organizationId),
           eq(attachmentCandidates.attachmentId, attachmentId),
           eq(attachmentCandidates.objectKey, candidateKey),
-          eq(attachmentCandidates.status, 'active'),
+          eq(attachmentCandidates.retention, 'candidate'),
+          inArray(attachmentCandidates.status, ['active', 'fenced', 'cleaned']),
         ),
       );
   }
@@ -337,13 +346,14 @@ export class DrizzleAttachmentTransaction implements AttachmentTransaction {
     const state = attachment.snapshot;
     const candidate = await this.scope.db
       .update(attachmentCandidates)
-      .set({ status: 'elected' })
+      .set({ status: 'elected', retention: 'preserve' })
       .where(
         and(
           eq(attachmentCandidates.organizationId, this.organizationId),
           eq(attachmentCandidates.attachmentId, state.id),
           eq(attachmentCandidates.objectKey, candidateKey),
           eq(attachmentCandidates.status, 'active'),
+          eq(attachmentCandidates.retention, 'candidate'),
         ),
       )
       .returning({ objectKey: attachmentCandidates.objectKey });

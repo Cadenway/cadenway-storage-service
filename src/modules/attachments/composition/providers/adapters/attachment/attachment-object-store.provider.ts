@@ -2,6 +2,7 @@ import { CONFIG } from '@cadenway/nest-common';
 import type { FactoryProvider } from '@nestjs/common';
 
 import type { AppConfig } from '../../../../../../config/app-config.js';
+import { UploadTransferTicket } from '../../../../../../infrastructure/object-storage/upload-transfer-ticket.js';
 import type { AttachmentObjectEraser } from '../../../../application/ports/outbound/object-storage/attachment/attachment-object-eraser.port.js';
 import type { AttachmentObjectInventory } from '../../../../application/ports/outbound/object-storage/attachment/attachment-object-inventory.port.js';
 import type { AttachmentObjectStore } from '../../../../application/ports/outbound/object-storage/attachment/attachment-object-store.port.js';
@@ -33,6 +34,7 @@ export const attachmentObjectStoreProvider: FactoryProvider<ObjectStorage> = {
       return {
         signUpload: rejectTransfer,
         copyAndVerify: rejectTransfer,
+        retainCandidate: rejectTransfer,
         signDownload: rejectTransfer,
         deleteObject: rejectTransfer,
         listAttachmentObjects: rejectTransfer,
@@ -55,6 +57,10 @@ export const attachmentObjectStoreProvider: FactoryProvider<ObjectStorage> = {
         },
       },
       objectStorage.publicEndpoint,
+      objectStorage.eraseTransientVersions,
+      objectStorage.uploadTransferUrl === undefined
+        ? undefined
+        : new UploadTransferTicket(objectStorage.uploadTransferUrl, objectStorage.receiptKeys),
     );
   },
 };

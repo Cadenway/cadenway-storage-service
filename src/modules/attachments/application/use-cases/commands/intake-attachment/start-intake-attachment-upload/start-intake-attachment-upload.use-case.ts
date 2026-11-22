@@ -54,8 +54,19 @@ export class StartIntakeAttachmentUpload {
       attachmentId: input.attachmentId,
     };
     const claim = await this.work.run(input.organizationId, async (store) => {
-      await store.lock(identity);
-      return store.beginSigning(proposed);
+      const existing = await store.lock(identity);
+      if (existing === null) {
+        const { usedBytes, limitBytes } = await store.lockAndReadStorageAdmission(true);
+        if (usedBytes + BigInt(input.sizeBytes) > limitBytes) {
+          throw new AttachmentRefusal('storage-quota-exceeded');
+        }
+      }
+      const claim = await store.beginSigning(proposed);
+      // A restored pre-receipt reservation may already have issued its original grant.
+      if (existing !== null && claim.kind === 'acquired' && this.objects.oneShotUploads === true) {
+        throw new AttachmentRefusal('not-found');
+      }
+      return claim;
     });
     if (claim.kind !== 'acquired') return resolveClaim(claim);
     try {
@@ -66,6 +77,7 @@ export class StartIntakeAttachmentUpload {
         attachmentId: input.attachmentId,
         stagingKey: reservation.stagingObjectKey,
         contentType: reservation.contentType,
+        sizeBytes: reservation.sizeBytes,
         expiresAt: reservation.uploadExpiresAt,
       });
       const signedExpiry = new Date(capability.expiresAt);

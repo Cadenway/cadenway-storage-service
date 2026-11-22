@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { Attachment } from '../../../../../domain/aggregates/attachment/attachment.aggregate.js';
+import type { AttachmentObjectEraser } from '../../../../ports/outbound/object-storage/attachment/attachment-object-eraser.port.js';
 import type { AttachmentCleanupTransaction } from '../../../../ports/outbound/persistence/attachment/attachment-cleanup-transaction.port.js';
 import type { AttachmentCleanupUnitOfWork } from '../../../../ports/outbound/transactions/attachment/attachment-cleanup-unit-of-work.port.js';
 import { CleanAttachmentObjects } from './clean-attachment-objects.use-case.js';
@@ -12,6 +13,7 @@ function fixture(count: number) {
   const fenced = Array.from({ length: count }, (_, index) => ({
     generation: 1,
     objectKey: `org/${organizationId}/${String(index).padStart(4, '0')}`,
+    retention: index % 2 === 0 ? ('preserve' as const) : ('transient' as const),
   }));
   const last = fenced.at(-1);
   const next =
@@ -47,7 +49,7 @@ function fixture(count: number) {
       }
     },
   };
-  const remove = vi.fn((key: string) => {
+  const remove = vi.fn<AttachmentObjectEraser['deleteObject']>((key) => {
     expect(transactionOpen).toBe(false);
     expect(key).toMatch(/^org\//u);
     return Promise.resolve();
@@ -76,7 +78,9 @@ describe('CleanAttachmentObjects', () => {
       next: null,
     });
     expect(fenceDueObjects).toHaveBeenCalledWith(cutoff, null, 50);
-    expect(remove.mock.calls.map(([key]) => key)).toEqual(fenced.map(({ objectKey }) => objectKey));
+    expect(remove.mock.calls).toEqual(
+      fenced.map(({ objectKey, retention }) => [objectKey, retention]),
+    );
     expect(settleObjectErasures).toHaveBeenCalledWith(
       fenced.map((object) => ({ ...object, erased: true })),
     );

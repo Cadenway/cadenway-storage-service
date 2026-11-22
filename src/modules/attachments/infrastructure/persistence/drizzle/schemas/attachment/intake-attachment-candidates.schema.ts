@@ -13,6 +13,7 @@ import {
   uuid,
 } from 'drizzle-orm/pg-core';
 
+import type { AttachmentObjectRetention } from '../../../../../application/models/attachment/attachment-object-retention.model.js';
 import { intakeAttachments } from './intake-attachments.schema.js';
 
 /** Object candidates persist independently until a terminal Task decision permits cleanup. */
@@ -26,6 +27,8 @@ export const intakeAttachmentCandidates = pgTable(
     status: text('status').notNull(),
     cleanupAfter: timestamp('cleanup_after', { withTimezone: true, precision: 3 }).notNull(),
     cleanupGeneration: integer('cleanup_generation').notNull().default(0),
+    stagingBytes: integer('staging_bytes'),
+    retention: text('retention').$type<AttachmentObjectRetention>().notNull().default('preserve'),
   },
   (table) => [
     primaryKey({
@@ -57,6 +60,14 @@ export const intakeAttachmentCandidates = pgTable(
       sql`${table.status} in ('staging', 'active', 'elected', 'fenced', 'cleaned')`,
     ),
     check('intake_attachment_candidates_generation_check', sql`${table.cleanupGeneration} >= 0`),
+    check(
+      'intake_attachment_candidates_staging_bytes_check',
+      sql`${table.stagingBytes} is null or ${table.stagingBytes} between 1 and 26214400`,
+    ),
+    check(
+      'intake_attachment_candidates_elected_history_check',
+      sql`${table.retention} in ('preserve', 'candidate', 'transient') and (${table.status} <> 'elected' or ${table.retention} = 'preserve')`,
+    ),
     organizationPolicy('intake_attachment_candidates_organization_isolation'),
   ],
 );

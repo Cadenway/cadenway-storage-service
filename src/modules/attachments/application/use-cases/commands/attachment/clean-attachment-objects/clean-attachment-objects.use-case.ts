@@ -34,7 +34,7 @@ export class CleanAttachmentObjects {
     for (const object of page.objects) {
       if (input.signal.aborted) break;
       try {
-        await this.objects.deleteObject(object.objectKey);
+        await this.objects.deleteObject(object.objectKey, object.retention);
         results.push({ ...object, erased: true });
       } catch {
         results.push({ ...object, erased: false });

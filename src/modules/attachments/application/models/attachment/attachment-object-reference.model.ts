@@ -6,5 +6,8 @@ export interface AttachmentObjectReference {
 
   /** Full immutable attachment key. */
   readonly objectKey: string;
+
+  /** Historical versions can rearm only a key whose ledger permits physical deletion. */
+  readonly transientOnly?: true;
   // #endregion
 }

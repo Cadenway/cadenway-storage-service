@@ -57,7 +57,12 @@ export class PrepareProfileMedia {
         throw new ProfileMediaUnavailable();
       }
       this.activePreparation = permit;
-      await store.registerCandidate(input.owner, input.uploadId, candidateId);
+      await store.registerCandidate(
+        input.owner,
+        input.uploadId,
+        candidateId,
+        this.objects.candidateRetention,
+      );
       return {
         preparation: null,
         contentType: declaration.contentType,
@@ -92,21 +97,53 @@ export class PrepareProfileMedia {
       throw new ProfileMediaUnavailable();
     }
     await this.objects.putCandidate({ ...input, candidateId, png: result.png }, input.signal);
-    input.signal?.throwIfAborted();
-    return this.work.run(input.owner, async (store) => {
-      if ((await store.lockOwner(input.owner)).snapshot.deleted)
-        throw new ProfileMediaError('not-found');
+    try {
+      if (this.objects.candidateRetention === 'candidate') {
+        await this.objects.pinCandidateForRestore({ ...input, candidateId }, input.signal);
+      }
+      input.signal?.throwIfAborted();
+    } catch (error) {
+      // Election has not started. Even a pin PUT with an uncertain outcome is now disposable.
+      await this.work
+        .run(input.owner, async (store) => {
+          await store.lockOwner(input.owner);
+          await store.scheduleCandidateCleanup(input.owner, input.uploadId, candidateId);
+        })
+        .catch(() => undefined);
+      throw error;
+    }
+    const resultOfElection = await this.work.run(input.owner, async (store) => {
+      const discard = () =>
+        store.scheduleCandidateCleanup(input.owner, input.uploadId, candidateId);
+      const refuse = async (refusal: ProfileMediaError | ProfileMediaUnavailable) => {
+        await discard();
+        return { refusal };
+      };
+      if ((await store.lockOwner(input.owner)).snapshot.deleted) {
+        return refuse(new ProfileMediaError('not-found'));
+      }
       const upload = await store.lockUpload(input.owner, input.uploadId);
-      if (upload === null) throw new ProfileMediaError('not-found');
-      upload.assertUploader(input.owner, input.uploaderUserId);
-      const elected = upload.prepare(result.verification, this.runtime.now());
-      if (elected !== upload && !(await store.electCandidate(elected, candidateId))) {
-        throw new ProfileMediaUnavailable();
+      if (upload === null) return refuse(new ProfileMediaError('not-found'));
+      let elected;
+      try {
+        upload.assertUploader(input.owner, input.uploaderUserId);
+        elected = upload.prepare(result.verification, this.runtime.now());
+      } catch (error) {
+        if (error instanceof ProfileMediaError) return refuse(error);
+        throw error;
       }
       const preparation = elected.getPreparation();
       if (preparation === null) throw new ProfileMediaUnavailable();
+      if (elected === upload) {
+        await discard();
+      } else if (!(await store.electCandidate(elected, candidateId))) {
+        return refuse(new ProfileMediaUnavailable());
+      }
       return { preparation };
     });
+    // Do not release the pin after an ambiguous election transaction or commit.
+    if ('refusal' in resultOfElection) throw resultOfElection.refusal;
+    return resultOfElection;
   }
   // #endregion
 }

@@ -8,6 +8,7 @@ import type { AttachmentReconciliation } from '../../../../../application/ports/
 import type { IntakeAttachmentReconciliation } from '../../../../../application/ports/outbound/persistence/intake-attachment/intake-attachment-reconciliation.port.js';
 import { attachmentCandidates } from '../../schemas/attachment/attachment-candidates.schema.js';
 import { attachmentReconciliationCursors } from '../../schemas/attachment/attachment-reconciliation-cursors.schema.js';
+import { attachments } from '../../schemas/attachment/attachments.schema.js';
 import { intakeAttachmentCandidates } from '../../schemas/attachment/intake-attachment-candidates.schema.js';
 
 const leaseValues = {
@@ -107,29 +108,41 @@ export class DrizzleAttachmentReconciliation implements AttachmentReconciliation
 
       const keys = sql.join(
         page.objects.map(
-          ({ organizationId, objectKey }) => sql`(${organizationId}::uuid, ${objectKey}::text)`,
+          ({ organizationId, objectKey, transientOnly }) =>
+            sql`(${organizationId}::uuid, ${objectKey}::text, ${transientOnly ?? false}::boolean)`,
         ),
         sql`, `,
       );
+      const knownStaging = sql`
+        candidate.object_key = attachment.staging_object_key
+        and candidate.object_key <> attachment.object_key
+        and candidate.object_key is distinct from attachment.elected_object_key
+      `;
       const requeued = await db.execute(sql`
         update ${attachmentCandidates} as candidate
         set status = 'fenced',
             cleanup_after = clock_timestamp(),
-            cleanup_generation = cleanup_generation + 1
-        from (values ${keys}) as observed(organization_id, object_key)
+            cleanup_generation = cleanup_generation + 1,
+            retention = case when ${knownStaging} then 'transient' else candidate.retention end
+        from (values ${keys}) as observed(organization_id, object_key, transient_only),
+             ${attachments} as attachment
         where candidate.organization_id = observed.organization_id
           and candidate.object_key = observed.object_key
+          and candidate.organization_id = attachment.organization_id
+          and candidate.attachment_id = attachment.id
           and candidate.status = 'cleaned'
+          and (not observed.transient_only or candidate.retention = 'transient' or (${knownStaging}))
       `);
       const intakeRequeued = await db.execute(sql`
         update ${intakeAttachmentCandidates} as candidate
         set status = 'fenced',
             cleanup_after = clock_timestamp(),
             cleanup_generation = cleanup_generation + 1
-        from (values ${keys}) as observed(organization_id, object_key)
+        from (values ${keys}) as observed(organization_id, object_key, transient_only)
         where candidate.organization_id = observed.organization_id
           and candidate.object_key = observed.object_key
           and candidate.status = 'cleaned'
+          and (not observed.transient_only or candidate.retention = 'transient')
           and not exists (
             select 1 from ${attachmentCandidates} as ordinary
             where ordinary.organization_id = candidate.organization_id
@@ -173,17 +186,20 @@ export class DrizzleIntakeAttachmentReconciliation implements IntakeAttachmentRe
     return this.cursor.complete(leaseId, page.next, async (db) => {
       if (page.objects.length === 0) return 0;
       const keys = sql.join(
-        page.objects.map(({ objectKey }) => sql`${objectKey}`),
+        page.objects.map(({ objectKey }) => sql`(${objectKey}::text)`),
         sql`, `,
       );
+      // Intake never elects an object from its opaque staging namespace.
       const requeued = await db.execute(sql`
-        update ${intakeAttachmentCandidates}
+        update ${intakeAttachmentCandidates} as candidate
         set status = 'fenced',
             cleanup_after = clock_timestamp(),
-            cleanup_generation = cleanup_generation + 1
-        where object_key like 'intake/%'
-          and object_key in (${keys})
-          and status = 'cleaned'
+            cleanup_generation = cleanup_generation + 1,
+            retention = 'transient'
+        from (values ${keys}) as observed(object_key)
+        where candidate.object_key like 'intake/%'
+          and candidate.object_key = observed.object_key
+          and candidate.status = 'cleaned'
       `);
       return requeued.rowCount ?? 0;
     });

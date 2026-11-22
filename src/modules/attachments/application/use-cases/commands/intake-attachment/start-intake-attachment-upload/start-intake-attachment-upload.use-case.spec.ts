@@ -97,6 +97,7 @@ function fixture() {
         });
       },
     ),
+    retainCandidate: vi.fn<IntakeAttachmentObjectStore['retainCandidate']>(),
     copyAndVerifyIntake: vi.fn<IntakeAttachmentObjectStore['copyAndVerifyIntake']>(() => {
       expect(transaction).toBe(false);
       return Promise.resolve(verification);
@@ -112,18 +113,36 @@ function fixture() {
 describe('Anonymous intake attachment transactions', () => {
   it('signs the opaque persisted staging key and saves the precise capability under the lease', async () => {
     const f = fixture();
+    f.store.lock.mockResolvedValueOnce(null);
     const operation = new StartIntakeAttachmentUpload(f.work, f.objects, f.runtime, {
       lookup: () => 'image/png',
     });
     const result = await operation.execute(start);
 
     expect(result.replayed).toBe(false);
+    expect(f.store.lockAndReadStorageAdmission).toHaveBeenCalledExactlyOnceWith(true);
+    expect(f.store.lockAndReadStorageAdmission).toHaveBeenCalledBefore(f.store.beginSigning);
     expect(f.store.completeSigning).toHaveBeenCalledExactlyOnceWith(
       scope,
       'lease',
       result.capability,
     );
     expect(f.store.releaseSigning).not.toHaveBeenCalled();
+  });
+
+  it('declines a new allocation before recording or signing it when staging is full', async () => {
+    const f = fixture();
+    f.store.lock.mockResolvedValueOnce(null);
+    f.store.lockAndReadStorageAdmission.mockResolvedValueOnce({ usedBytes: 1n, limitBytes: 20n });
+    const operation = new StartIntakeAttachmentUpload(f.work, f.objects, f.runtime, {
+      lookup: () => 'image/png',
+    });
+
+    await expect(operation.execute(start)).rejects.toMatchObject({
+      reason: 'storage-quota-exceeded',
+    });
+    expect(f.store.beginSigning).not.toHaveBeenCalled();
+    expect(f.objects.signIntakeUpload).not.toHaveBeenCalled();
   });
 
   it('rejects a release racing with signing and never returns the signed capability', async () => {
@@ -135,6 +154,18 @@ describe('Anonymous intake attachment transactions', () => {
 
     await expect(operation.execute(start)).rejects.toMatchObject({ reason: 'not-found' });
     expect(f.store.releaseSigning).toHaveBeenCalledExactlyOnceWith(scope, 'lease');
+  });
+
+  it('requires a new allocation when an existing one-shot staging key has no receipt', async () => {
+    const f = fixture();
+    const operation = new StartIntakeAttachmentUpload(
+      f.work,
+      { ...f.objects, oneShotUploads: true },
+      f.runtime,
+      { lookup: () => 'image/png' },
+    );
+    await expect(operation.execute(start)).rejects.toMatchObject({ reason: 'not-found' });
+    expect(f.objects.signIntakeUpload).not.toHaveBeenCalled();
   });
 
   it('copies outside transactions, then elects the candidate and its verification fact together', async () => {
