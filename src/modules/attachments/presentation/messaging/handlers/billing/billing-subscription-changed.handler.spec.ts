@@ -67,6 +67,8 @@ describe(BillingSubscriptionChangedHandler.name, () => {
     expect(execute).toHaveBeenCalledExactlyOnceWith({
       organizationId: fact.organizationId,
       version: fact.version,
+      plan: fact.plan,
+      seatLimit: fact.seatLimit,
       limitBytes: 100_000_000_000n,
     });
     expect(context.claimVersion).not.toHaveBeenCalled();

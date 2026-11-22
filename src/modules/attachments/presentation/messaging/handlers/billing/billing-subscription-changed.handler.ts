@@ -46,6 +46,8 @@ export class BillingSubscriptionChangedHandler implements OnApplicationBootstrap
     const outcome = await this.applyEntitlement.execute({
       organizationId,
       version: fact.version,
+      plan: fact.plan,
+      seatLimit: fact.seatLimit,
       limitBytes: BigInt(fact.storageByteLimit),
     });
     context.signal.throwIfAborted();
