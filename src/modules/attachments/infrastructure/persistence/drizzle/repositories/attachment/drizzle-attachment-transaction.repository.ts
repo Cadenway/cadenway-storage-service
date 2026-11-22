@@ -304,6 +304,21 @@ export class DrizzleAttachmentTransaction implements AttachmentTransaction {
     });
   }
 
+  /** Schedules only this rejected unelected copy for the next cleanup sweep. */
+  public async scheduleCandidateCleanup(attachmentId: string, candidateKey: string): Promise<void> {
+    await this.scope.db
+      .update(attachmentCandidates)
+      .set({ cleanupAfter: sql`now()` })
+      .where(
+        and(
+          eq(attachmentCandidates.organizationId, this.organizationId),
+          eq(attachmentCandidates.attachmentId, attachmentId),
+          eq(attachmentCandidates.objectKey, candidateKey),
+          eq(attachmentCandidates.status, 'active'),
+        ),
+      );
+  }
+
   /** Elects only an active candidate of the locked pending attachment. */
   public async electCandidate(attachment: Attachment, candidateKey: string): Promise<boolean> {
     const state = attachment.snapshot;

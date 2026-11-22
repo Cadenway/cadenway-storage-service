@@ -38,6 +38,9 @@ function fixture(
 ): {
   readonly useCase: CompleteAttachmentUpload;
   readonly registerCandidate: ReturnType<typeof vi.fn<AttachmentTransaction['registerCandidate']>>;
+  readonly scheduleCandidateCleanup: ReturnType<
+    typeof vi.fn<AttachmentTransaction['scheduleCandidateCleanup']>
+  >;
   readonly lockAndReadVerifiedBytes: ReturnType<
     typeof vi.fn<AttachmentTransaction['lockAndReadVerifiedBytes']>
   >;
@@ -47,10 +50,12 @@ function fixture(
   readonly lockTask: ReturnType<typeof vi.fn<AttachmentTransaction['lockTask']>>;
   readonly registerTaskPurge: ReturnType<typeof vi.fn<AttachmentTransaction['registerTaskPurge']>>;
   readonly work: AttachmentUnitOfWork;
+  readonly committed: ReturnType<typeof vi.fn>;
   readonly copy: ReturnType<typeof vi.fn<AttachmentObjectStore['copyAndVerify']>>;
 } {
   let attachment = initial;
   const registerCandidate = vi.fn<AttachmentTransaction['registerCandidate']>();
+  const scheduleCandidateCleanup = vi.fn<AttachmentTransaction['scheduleCandidateCleanup']>();
   const electCandidate = vi.fn<AttachmentTransaction['electCandidate']>((ready) => {
     attachment = ready;
     return Promise.resolve(true);
@@ -73,13 +78,19 @@ function fixture(
     completeUploadClaim: vi.fn(),
     releaseUploadClaim: vi.fn(),
     registerCandidate,
+    scheduleCandidateCleanup,
     lockAndReadVerifiedBytes,
     electCandidate,
     deleteAttachment: vi.fn(),
     appendFact,
   };
+  const committed = vi.fn();
   const work: AttachmentUnitOfWork = {
-    run: async (_organizationId, operation) => operation(store),
+    run: async (_organizationId, operation) => {
+      const result = await operation(store);
+      committed();
+      return result;
+    },
   };
   const copy = vi.fn<AttachmentObjectStore['copyAndVerify']>(() =>
     Promise.resolve({
@@ -95,6 +106,7 @@ function fixture(
   };
   return {
     registerCandidate,
+    scheduleCandidateCleanup,
     lockAndReadVerifiedBytes,
     electCandidate,
     appendFact,
@@ -102,6 +114,7 @@ function fixture(
     lockTask,
     registerTaskPurge,
     work,
+    committed,
     copy,
     useCase: new CompleteAttachmentUpload(
       work,
@@ -138,17 +151,25 @@ describe('CompleteAttachmentUpload', () => {
   });
 
   it('refuses verified bytes over quota before election and leaves the upload retryable', async () => {
-    const { useCase, lockAndReadVerifiedBytes, electCandidate, appendFact } = fixture(
-      reservation(),
-      () => now,
-      20n,
-    );
+    const {
+      useCase,
+      lockAndReadVerifiedBytes,
+      scheduleCandidateCleanup,
+      electCandidate,
+      appendFact,
+      committed,
+    } = fixture(reservation(), () => now, 20n);
     lockAndReadVerifiedBytes.mockResolvedValueOnce(1n).mockResolvedValueOnce(0n);
     await expect(useCase.execute(input)).rejects.toMatchObject({
       reason: 'storage-quota-exceeded',
     });
     expect(electCandidate).not.toHaveBeenCalled();
     expect(appendFact).not.toHaveBeenCalled();
+    expect(scheduleCandidateCleanup).toHaveBeenCalledExactlyOnceWith(
+      attachmentId,
+      `org/${organizationId}/${candidateId}`,
+    );
+    expect(committed).toHaveBeenCalledTimes(2);
     await expect(useCase.execute(input)).resolves.toMatchObject({
       attachment: { id: attachmentId },
     });
