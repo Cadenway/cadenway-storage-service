@@ -21,7 +21,7 @@ export class CleanProfileMedia {
     input.signal?.throwIfAborted();
     const leases = await this.cleanup.claim(maximumBatchSize);
     let deleted = 0;
-    for (const lease of leases) {
+    for (const [index, lease] of leases.entries()) {
       try {
         input.signal?.throwIfAborted();
         await this.objects.erase(lease, input.signal);
@@ -29,7 +29,7 @@ export class CleanProfileMedia {
         await this.cleanup.complete(lease);
         deleted += 1;
       } catch (error) {
-        await this.cleanup.release(lease).catch(() => undefined);
+        await this.cleanup.release(leases.slice(index)).catch(() => undefined);
         throw error;
       }
     }

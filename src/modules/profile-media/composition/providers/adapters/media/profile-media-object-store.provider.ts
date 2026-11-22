@@ -2,6 +2,7 @@ import { CONFIG } from '@cadenway/nest-common';
 import type { FactoryProvider } from '@nestjs/common';
 
 import type { AppConfig } from '../../../../../../config/app-config.js';
+import { UploadTransferTicket } from '../../../../../../infrastructure/object-storage/upload-transfer-ticket.js';
 import { ProfileMediaUnavailable } from '../../../../application/models/media/profile-media-unavailable.model.js';
 import type { ProfileMediaEraser } from '../../../../application/ports/outbound/object-storage/media/profile-media-eraser.port.js';
 import type { ProfileMediaObjects } from '../../../../application/ports/outbound/object-storage/media/profile-media-objects.port.js';
@@ -22,9 +23,11 @@ export const profileMediaObjectStoreProvider: FactoryProvider<ObjectStore> = {
   useFactory: ({ objectStorage }: Readonly<AppConfig>): ObjectStore => {
     if (objectStorage === undefined) {
       return {
+        candidateRetention: 'preserve',
         sign: objectStoreUnavailable,
         readSource: objectStoreUnavailable,
         putCandidate: objectStoreUnavailable,
+        pinCandidateForRestore: objectStoreUnavailable,
         readCandidate: objectStoreUnavailable,
         erase: objectStoreUnavailable,
         listProfileMediaObjects: objectStoreUnavailable,
@@ -42,6 +45,10 @@ export const profileMediaObjectStoreProvider: FactoryProvider<ObjectStore> = {
         },
       },
       objectStorage.publicEndpoint,
+      objectStorage.eraseTransientVersions,
+      objectStorage.uploadTransferUrl === undefined
+        ? undefined
+        : new UploadTransferTicket(objectStorage.uploadTransferUrl, objectStorage.receiptKeys),
     );
   },
 };

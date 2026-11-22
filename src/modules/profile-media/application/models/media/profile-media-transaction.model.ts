@@ -2,6 +2,7 @@ import type { ProfileMediaOwner } from '../../../domain/aggregates/media/profile
 import type { ProfileMediaUpload } from '../../../domain/aggregates/media/profile-media-upload.aggregate.js';
 import type { ProfileMediaOwnerBinding } from '../../../domain/value-objects/media/profile-media-owner-binding.value-object.js';
 import type { ProfileMediaCapability } from './profile-media-capability.model.js';
+import type { ProfileMediaCandidateRetention } from './profile-media-candidate-retention.model.js';
 
 /** Operations executed within the current owner-scoped transaction. */
 export interface ProfileMediaTransaction {
@@ -46,10 +47,18 @@ export interface ProfileMediaTransaction {
     owner: ProfileMediaOwnerBinding,
     uploadId: string,
     candidateId: string,
+    retention: ProfileMediaCandidateRetention,
   ): Promise<void>;
 
   /** Elects the prepared derivative atomically and fences other candidates for cleanup. */
   electCandidate(upload: ProfileMediaUpload, candidateId: string): Promise<boolean>;
+
+  /** Fences only this never-elected candidate and makes its versions disposable. */
+  scheduleCandidateCleanup(
+    owner: ProfileMediaOwnerBinding,
+    uploadId: string,
+    candidateId: string,
+  ): Promise<void>;
 
   /** Fences the staged object and any unselected candidates for bounded cleanup. */
   scheduleCleanup(owner: ProfileMediaOwnerBinding, uploadId: string): Promise<void>;

@@ -214,10 +214,10 @@ export class DrizzleAttachmentCleanupTransaction
   /** Rechecks the scanned generation and moves each claimed object beyond the current sweep. */
   private async leaseObjects(
     cutoff: Date,
-    candidates: readonly (CleanupCursor & FencedCleanupObject)[],
+    candidates: readonly (CleanupCursor & Pick<FencedCleanupObject, 'generation'>)[],
   ): Promise<readonly FencedCleanupObject[]> {
     if (candidates.length === 0) return [];
-    const { objectKey, cleanupAfter, cleanupGeneration, organizationId, status } =
+    const { objectKey, cleanupAfter, cleanupGeneration, organizationId, status, retention } =
       attachmentCandidates;
     const scanned = sql.join(
       candidates.map(
@@ -226,7 +226,11 @@ export class DrizzleAttachmentCleanupTransaction
       ),
       sql`, `,
     );
-    const result = await this.transaction.db.execute<{ objectKey: string; generation: number }>(sql`
+    const result = await this.transaction.db.execute<{
+      objectKey: string;
+      generation: number;
+      retention: FencedCleanupObject['retention'];
+    }>(sql`
       update ${attachmentCandidates}
       set status = 'fenced',
           cleanup_after = greatest(clock_timestamp(), ${cutoff.toISOString()}::timestamptz)
@@ -238,7 +242,8 @@ export class DrizzleAttachmentCleanupTransaction
         and ${objectKey} = scanned.object_key
         and ${cleanupAfter} = scanned.cleanup_after
         and ${cleanupGeneration} = scanned.generation
-      returning ${objectKey} as "objectKey", ${cleanupGeneration} as "generation"
+      returning ${objectKey} as "objectKey", ${cleanupGeneration} as "generation",
+        ${retention}
     `);
     return result.rows;
   }

@@ -85,6 +85,7 @@ function fixture() {
   const objects = {
     signUpload: vi.fn<AttachmentObjectStore['signUpload']>(),
     copyAndVerify: vi.fn<AttachmentObjectStore['copyAndVerify']>(),
+    retainCandidate: vi.fn<AttachmentObjectStore['retainCandidate']>(),
     signDownload: vi.fn<AttachmentObjectStore['signDownload']>(async () => {
       signing = true;
       releaseSigning();

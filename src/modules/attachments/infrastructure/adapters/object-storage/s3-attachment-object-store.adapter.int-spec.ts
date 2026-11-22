@@ -7,10 +7,15 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 import {
   CopyObjectCommand,
+  CreateBucketCommand,
+  DeleteObjectCommand,
   GetObjectCommand,
   HeadBucketCommand,
   HeadObjectCommand,
+  ListBucketsCommand,
+  ListObjectVersionsCommand,
   PutBucketCorsCommand,
+  PutBucketVersioningCommand,
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
@@ -24,11 +29,14 @@ import { S3AttachmentObjectStore } from './s3-attachment-object-store.adapter.js
 
 const IMAGE =
   'dxflrs/garage:v2.5.0@sha256:677e5b758e4425a325b811c425c026bf35a4bf42f7ddbaa773de3f4fd779a5a5';
+const SEAWEEDFS =
+  'chrislusf/seaweedfs@sha256:4b42c212543a0acd4c0e675215ecdcaf62a186ef98def76c7e12701871222d15';
 const BUCKET = 'attachments-test';
 const ORGANIZATION = '01938f6e-6d1a-7c3e-9a51-2f0c4b8d7e10';
 const ATTACHMENT = '019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b01';
 const STAGING = `org/${ORGANIZATION}/019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b02`;
 const CANDIDATE = `org/${ORGANIZATION}/019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b03`;
+const INTAKE_STAGING = 'intake/019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b04';
 const LIMIT = 25 * 1024 * 1024;
 const ORIGIN = 'https://app.example.test';
 const PNG = Uint8Array.from(
@@ -200,6 +208,7 @@ describe('Garage-backed attachment transfers', () => {
       attachmentId: ATTACHMENT,
       stagingKey: STAGING,
       contentType: 'image/png',
+      sizeBytes: PNG.length,
       expiresAt: new Date(Date.now() + 300_000),
     });
     const preflight = await fetch(capability.url, {
@@ -216,6 +225,7 @@ describe('Garage-backed attachment transfers', () => {
       attachmentId: ATTACHMENT,
       stagingKey: `org/${ORGANIZATION}/019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b05`,
       contentType: 'image/png',
+      sizeBytes: PNG.length,
       expiresAt: new Date(Date.now() + 300_000),
     });
     const foreignUpload = await upload(foreignCapability, PNG, 'https://other.example.test');
@@ -228,11 +238,22 @@ describe('Garage-backed attachment transfers', () => {
     const response = await upload(capability, PNG);
     expect(response.status).toBe(204);
     expect(response.headers.get('access-control-allow-origin')).toBe(ORIGIN);
-    expect(await store.copyAndVerify({ stagingKey: STAGING, candidateKey: CANDIDATE })).toEqual({
+    expect(
+      (await upload(capability, new Uint8Array(PNG.length + 1))).status,
+    ).toBeGreaterThanOrEqual(400);
+    expect(
+      await store.copyAndVerify({
+        stagingKey: STAGING,
+        candidateKey: CANDIDATE,
+        sizeBytes: PNG.length,
+      }),
+    ).toEqual({
       sizeBytes: PNG.length,
       contentType: 'image/png',
       verifiedContentType: 'image/png',
     });
+    await store.retainCandidate(CANDIDATE);
+    await store.retainCandidate(CANDIDATE);
     expect((await upload(capability, Uint8Array.from([1, 2, 3]))).status).toBe(204);
     await expect(
       client.send(
@@ -283,7 +304,7 @@ describe('Garage-backed attachment transfers', () => {
       conditions: expect.arrayContaining([
         { key: stagingKey },
         { 'Content-Type': 'image/png' },
-        ['content-length-range', 1, 5 * 1024 * 1024],
+        ['content-length-range', 1, source.sizeBytes],
       ]) as unknown,
     });
     expect((await upload(capability, png)).status).toBe(204);
@@ -314,7 +335,7 @@ describe('Garage-backed attachment transfers', () => {
       client.send(new HeadObjectCommand({ Bucket: BUCKET, Key: candidateKey })),
     ).resolves.toMatchObject({ ContentType: 'image/png', CacheControl: 'private, no-store' });
 
-    const cleanup = { owner, uploadId, generation: 1, leaseId };
+    const cleanup = { owner, uploadId, generation: 1, leaseId, retention: 'preserve' } as const;
     await profileStore.erase({ ...cleanup, objectId: uploadId });
     await expect(profileStore.readSource(source)).resolves.toBeNull();
     await expect(profileStore.readCandidate(candidate)).resolves.toEqual(result.png);
@@ -364,6 +385,7 @@ describe('Garage-backed attachment transfers', () => {
       attachmentId: ATTACHMENT,
       stagingKey,
       contentType: 'image/png',
+      sizeBytes: PNG.length,
       expiresAt,
     });
     expect(capability.fields.key).toBe(stagingKey);
@@ -372,7 +394,12 @@ describe('Garage-backed attachment transfers', () => {
     expect(response.status).toBe(204);
     expect(response.headers.get('access-control-allow-origin')).toBe(ORIGIN);
     await expect(
-      store.copyAndVerifyIntake({ organizationId: ORGANIZATION, stagingKey, candidateKey }),
+      store.copyAndVerifyIntake({
+        organizationId: ORGANIZATION,
+        stagingKey,
+        candidateKey,
+        sizeBytes: PNG.length,
+      }),
     ).resolves.toEqual({
       sizeBytes: PNG.length,
       contentType: 'image/png',
@@ -382,7 +409,11 @@ describe('Garage-backed attachment transfers', () => {
     const signal = new AbortController().signal;
     const page = await store.listIntakeObjects(null, signal);
     expect(page.objects).toEqual([{ objectKey: stagingKey }]);
-    await store.deleteIntakeObject({ organizationId: ORGANIZATION, objectKey: stagingKey });
+    await store.deleteIntakeObject({
+      organizationId: ORGANIZATION,
+      objectKey: stagingKey,
+      retention: 'transient',
+    });
     expect((await store.listIntakeObjects(null, signal)).objects).toEqual([]);
     const signed = await store.signDownload({ objectKey: candidateKey, fileName: 'sprint-14.png' });
     const download = await fetch(signed.url);
@@ -396,6 +427,7 @@ describe('Garage-backed attachment transfers', () => {
       attachmentId: ATTACHMENT,
       stagingKey: STAGING,
       contentType: 'image/png',
+      sizeBytes: LIMIT,
       expiresAt: new Date(Date.now() + 300_000),
     });
     const maximum = new Uint8Array(LIMIT);
@@ -405,12 +437,259 @@ describe('Garage-backed attachment transfers', () => {
     tooLarge.set(PNG);
     expect((await upload(capability, tooLarge)).status).toBeGreaterThanOrEqual(400);
     const nextCandidate = `org/${ORGANIZATION}/019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b04`;
-    expect(await store.copyAndVerify({ stagingKey: STAGING, candidateKey: nextCandidate })).toEqual(
-      {
+    expect(
+      await store.copyAndVerify({
+        stagingKey: STAGING,
+        candidateKey: nextCandidate,
         sizeBytes: LIMIT,
-        contentType: 'image/png',
-        verifiedContentType: 'image/png',
-      },
+      }),
+    ).toEqual({
+      sizeBytes: LIMIT,
+      contentType: 'image/png',
+      verifiedContentType: 'image/png',
+    });
+  });
+});
+
+describe('versioned SeaweedFS object erasure', () => {
+  it('drains staging versions and markers while keeping a protected candidate restorable after a rewind', async () => {
+    const container = `cadenway-storage-seaweedfs-test-${String(process.pid)}-${randomBytes(4).toString('hex')}`;
+    const environment = { ...process.env };
+    delete environment.DOCKER_HOST;
+    delete environment.DOCKER_CONTEXT;
+    const docker = (...args: readonly string[]): string =>
+      execFileSync('docker', args, { encoding: 'utf8', env: environment }).trim();
+    const dockerHost = docker('context', 'inspect', '--format', '{{.Endpoints.docker.Host}}');
+    if (!dockerHost.startsWith('npipe://') && !dockerHost.startsWith('unix://')) {
+      throw new Error('The versioned bucket test requires a local Docker socket.');
+    }
+    docker(
+      'run',
+      '--detach',
+      '--rm',
+      '--name',
+      container,
+      '--publish',
+      '127.0.0.1::8333',
+      '--tmpfs',
+      '/data:rw,size=192m',
+      SEAWEEDFS,
+      'server',
+      '-dir=/data',
+      '-s3',
+      '-s3.port=8333',
+      '-ip=127.0.0.1',
+      '-ip.bind=0.0.0.0',
     );
+    let client: S3Client | undefined;
+    let store: S3AttachmentObjectStore | undefined;
+    let profileStore: S3ProfileMediaObjects | undefined;
+    try {
+      const port = docker('port', container, '8333/tcp').split(':').at(-1);
+      if (port === undefined || !/^\d+$/u.test(port)) {
+        throw new Error('SeaweedFS has no published port.');
+      }
+      const endpoint = `http://127.0.0.1:${port}`;
+      const configuration = {
+        region: 'us-east-1',
+        endpoint,
+        forcePathStyle: true,
+        credentials: { accessKeyId: 'versioning-fixture', secretAccessKey: 'versioning-fixture' },
+        requestChecksumCalculation: 'WHEN_REQUIRED',
+        responseChecksumValidation: 'WHEN_REQUIRED',
+        maxAttempts: 1,
+      } as const;
+      const s3 = new S3Client(configuration);
+      client = s3;
+      const objectStore = new S3AttachmentObjectStore(BUCKET, configuration, endpoint, true);
+      store = objectStore;
+      const profiles = new S3ProfileMediaObjects(BUCKET, configuration, endpoint, true);
+      profileStore = profiles;
+      await vi.waitFor(() => s3.send(new ListBucketsCommand({})), {
+        timeout: 30_000,
+        interval: 200,
+      });
+      await s3.send(new CreateBucketCommand({ Bucket: BUCKET }));
+      await s3.send(
+        new PutBucketVersioningCommand({
+          Bucket: BUCKET,
+          VersioningConfiguration: { Status: 'Enabled' },
+        }),
+      );
+
+      const capability = await objectStore.signUpload({
+        attachmentId: ATTACHMENT,
+        stagingKey: STAGING,
+        contentType: 'image/png',
+        sizeBytes: PNG.length,
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      expect((await upload(capability, PNG)).status).toBe(204);
+      expect((await upload(capability, PNG)).status).toBe(204);
+      const candidate = await s3.send(
+        new PutObjectCommand({ Bucket: BUCKET, Key: CANDIDATE, Body: PNG }),
+      );
+      await objectStore.retainCandidate(CANDIDATE);
+      await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: STAGING }));
+      await s3.send(
+        new DeleteObjectCommand({ Bucket: BUCKET, Key: `attachment-restore-pins/${CANDIDATE}` }),
+      );
+      const listVersions = (Key: string) =>
+        s3.send(new ListObjectVersionsCommand({ Bucket: BUCKET, Prefix: Key }));
+      const staged = await listVersions(STAGING);
+      expect(staged.Versions).toHaveLength(2);
+      expect(staged.DeleteMarkers).toHaveLength(1);
+      const inventorySignal = AbortSignal.timeout(10_000);
+      const attachmentPage = await objectStore.listAttachmentObjects(null, inventorySignal);
+      expect(attachmentPage.objects).toEqual(
+        expect.arrayContaining([
+          { organizationId: ORGANIZATION, objectKey: STAGING, transientOnly: true },
+          { organizationId: ORGANIZATION, objectKey: CANDIDATE },
+        ]),
+      );
+      expect(attachmentPage.objects.filter(({ objectKey }) => objectKey === STAGING)).toHaveLength(
+        1,
+      );
+      await objectStore.deleteObject(STAGING, 'transient');
+      const cleared = await listVersions(STAGING);
+      expect(cleared.Versions ?? []).toEqual([]);
+      expect(cleared.DeleteMarkers ?? []).toEqual([]);
+
+      // A restored database may see the previously elected key as an unproven candidate.
+      await objectStore.deleteObject(CANDIDATE, 'candidate');
+      const retained = await listVersions(CANDIDATE);
+      expect(retained.DeleteMarkers).toHaveLength(1);
+      expect(retained.Versions).toEqual([
+        expect.objectContaining({ Key: CANDIDATE, VersionId: candidate.VersionId }),
+      ]);
+      const recoverable = await s3.send(
+        new GetObjectCommand({ Bucket: BUCKET, Key: CANDIDATE, VersionId: candidate.VersionId }),
+      );
+      expect(await recoverable.Body?.transformToByteArray()).toEqual(PNG);
+
+      const rejectedKey = `org/${ORGANIZATION}/019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b22`;
+      await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: rejectedKey, Body: PNG }));
+      await objectStore.retainCandidate(rejectedKey);
+      await objectStore.deleteObject(rejectedKey, 'transient');
+      const rejected = await listVersions(rejectedKey);
+      const releasedProof = await listVersions(`attachment-restore-pins/${rejectedKey}`);
+      expect(rejected.Versions ?? []).toEqual([]);
+      expect(releasedProof.Versions ?? []).toEqual([]);
+
+      await s3.send(new PutObjectCommand({ Bucket: BUCKET, Key: INTAKE_STAGING, Body: PNG }));
+      await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: INTAKE_STAGING }));
+      const intakePage = await objectStore.listIntakeObjects(null, inventorySignal);
+      expect(intakePage.objects).toContainEqual({ objectKey: INTAKE_STAGING, transientOnly: true });
+      await objectStore.deleteIntakeObject({
+        organizationId: ORGANIZATION,
+        objectKey: INTAKE_STAGING,
+        retention: 'transient',
+      });
+      expect((await listVersions(INTAKE_STAGING)).Versions ?? []).toEqual([]);
+
+      const avatar = { kind: 'avatar', id: ORGANIZATION } as const;
+      const logo = { kind: 'organization-logo', id: ORGANIZATION } as const;
+      const avatarUpload = '019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b31';
+      const avatarCandidate = '019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b32';
+      const logoUpload = '019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b33';
+      const logoCandidate = '019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b34';
+      const unclaimedLogo = '019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b35';
+      const image = Buffer.from(PNG);
+      const avatarImage = { owner: avatar, uploadId: avatarUpload, candidateId: avatarCandidate };
+      const logoImage = { owner: logo, uploadId: logoUpload, candidateId: logoCandidate };
+      const work = { leaseId: ATTACHMENT, generation: 1 };
+      const profileStageKey = `profile-media/staging/${avatarUpload}`;
+      const avatarKey = `profile-media/candidate/${avatarCandidate}`;
+      const logoKey = `profile-media/candidate/${logoCandidate}`;
+      const unclaimedKey = `profile-media/candidate/${unclaimedLogo}`;
+      const avatarProof = `attachment-restore-pins/${avatarKey}`;
+      const logoProof = `attachment-restore-pins/${logoKey}`;
+
+      const avatarTransfer = await profiles.sign({
+        ...avatarImage,
+        contentType: 'image/png',
+        sizeBytes: PNG.length,
+        expiresAt: new Date(Math.floor(Date.now() / 1_000) * 1_000 + 60_000),
+      });
+      expect((await upload(avatarTransfer, PNG)).status).toBe(204);
+      expect((await upload(avatarTransfer, PNG)).status).toBe(204);
+      await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: profileStageKey }));
+      expect((await listVersions(profileStageKey)).Versions).toHaveLength(2);
+      const inventory = await profiles.listProfileMediaObjects(null, AbortSignal.timeout(10_000));
+      expect(inventory.objects).toEqual([{ role: 'staging', objectId: avatarUpload }]);
+      await profiles.erase({
+        ...work,
+        ...avatarImage,
+        objectId: avatarUpload,
+        retention: 'transient',
+      });
+      expect((await listVersions(profileStageKey)).Versions ?? []).toEqual([]);
+      expect((await listVersions(profileStageKey)).DeleteMarkers ?? []).toEqual([]);
+
+      await profiles.putCandidate({ ...avatarImage, png: image });
+      await profiles.pinCandidateForRestore(avatarImage);
+      await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: avatarProof }));
+      const avatarVersion = (await listVersions(avatarKey)).Versions?.[0]?.VersionId;
+      expect(avatarVersion).toBeTruthy();
+      await profiles.erase({
+        ...work,
+        ...avatarImage,
+        objectId: avatarCandidate,
+        retention: 'candidate',
+      });
+      const retainedAvatar = await s3.send(
+        new GetObjectCommand({ Bucket: BUCKET, Key: avatarKey, VersionId: avatarVersion }),
+      );
+      expect(await retainedAvatar.Body?.transformToByteArray()).toEqual(PNG);
+      expect((await listVersions(avatarKey)).DeleteMarkers).toHaveLength(1);
+
+      await profiles.putCandidate({ ...logoImage, png: image });
+      await profiles.pinCandidateForRestore(logoImage);
+      await profiles.erase({
+        ...work,
+        ...logoImage,
+        objectId: logoCandidate,
+        retention: 'transient',
+      });
+      expect((await listVersions(logoKey)).Versions ?? []).toEqual([]);
+      expect((await listVersions(logoProof)).Versions ?? []).toEqual([]);
+
+      // Model a pin request that reached the bucket after the cleanup lease settled.
+      await profiles.pinCandidateForRestore(logoImage);
+      const historyPage = await profiles.listProfileMediaObjects(null, inventorySignal);
+      expect(historyPage.objects).toContainEqual({
+        role: 'candidate',
+        objectId: avatarCandidate,
+        transientOnly: true,
+      });
+      const proofPage = await profiles.listProfileMediaObjects(historyPage.next, inventorySignal);
+      expect(proofPage.objects).toEqual(
+        expect.arrayContaining([
+          { role: 'candidate', objectId: avatarCandidate, transientOnly: true },
+          { role: 'candidate', objectId: logoCandidate, transientOnly: true },
+        ]),
+      );
+      await profiles.erase({
+        ...work,
+        ...logoImage,
+        objectId: logoCandidate,
+        retention: 'transient',
+      });
+      expect((await listVersions(logoProof)).Versions ?? []).toEqual([]);
+
+      await profiles.putCandidate({ ...logoImage, candidateId: unclaimedLogo, png: image });
+      await profiles.erase({
+        ...work,
+        ...logoImage,
+        objectId: unclaimedLogo,
+        retention: 'candidate',
+      });
+      expect((await listVersions(unclaimedKey)).Versions ?? []).toEqual([]);
+    } finally {
+      client?.destroy();
+      store?.onModuleDestroy();
+      profileStore?.onModuleDestroy();
+      docker('rm', '--force', container);
+    }
   });
 });

@@ -32,6 +32,7 @@ export class CleanIntakeAttachmentObjects {
         await this.objects.deleteIntakeObject({
           organizationId: input.organizationId,
           objectKey: object.objectKey,
+          retention: object.retention,
         });
         results.push({ ...object, erased: true });
       } catch {

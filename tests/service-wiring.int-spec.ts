@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { createHash, generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto';
 import { EventEmitter, once } from 'node:events';
+import { createServer as createHttpServer } from 'node:http';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 
@@ -27,7 +28,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { AppModule } from '../src/app.module.js';
-import { appConfigSchema } from '../src/config/app-config.js';
+import { appConfigSchema, uploadTransferPath } from '../src/config/app-config.js';
 import {
   PURGE_UPLOAD_RECEIPTS_QUEUE,
   RECONCILE_ATTACHMENT_OBJECTS_QUEUE,
@@ -40,6 +41,7 @@ import {
   profileMediaPaths,
 } from '../src/infrastructure/http/no-store-profile-media.middleware.js';
 import { noStoreIntakeAttachmentParserErrors } from '../src/infrastructure/http/no-store-intake-attachments.middleware.js';
+import { UploadTransferTicket } from '../src/infrastructure/object-storage/upload-transfer-ticket.js';
 import type { AttachmentObjectStore } from '../src/modules/attachments/application/ports/outbound/object-storage/attachment/attachment-object-store.port.js';
 import { CleanPurgedTask } from '../src/modules/attachments/application/use-cases/commands/attachment/clean-purged-task/clean-purged-task.use-case.js';
 import { CleanAttachmentObjects } from '../src/modules/attachments/application/use-cases/commands/attachment/clean-attachment-objects/clean-attachment-objects.use-case.js';
@@ -49,7 +51,10 @@ import { UploadReceiptCodec } from '../src/modules/attachments/infrastructure/ad
 import { PostgresAttachmentRuntime } from '../src/modules/attachments/infrastructure/adapters/runtime/postgres-attachment-runtime.adapter.js';
 import { DrizzleAttachmentCleanupDiscovery } from '../src/modules/attachments/infrastructure/persistence/drizzle/repositories/attachment/drizzle-attachment-cleanup-discovery.repository.js';
 import { DrizzleAttachmentReader } from '../src/modules/attachments/infrastructure/persistence/drizzle/repositories/attachment/drizzle-attachment-reader.repository.js';
-import { DrizzleAttachmentReconciliation } from '../src/modules/attachments/infrastructure/persistence/drizzle/repositories/attachment/drizzle-attachment-reconciliation.repository.js';
+import {
+  DrizzleAttachmentReconciliation,
+  DrizzleIntakeAttachmentReconciliation,
+} from '../src/modules/attachments/infrastructure/persistence/drizzle/repositories/attachment/drizzle-attachment-reconciliation.repository.js';
 import { DrizzleAttachmentTransaction } from '../src/modules/attachments/infrastructure/persistence/drizzle/repositories/attachment/drizzle-attachment-transaction.repository.js';
 import { DrizzleExpiredUploadReceipts } from '../src/modules/attachments/infrastructure/persistence/drizzle/repositories/attachment/drizzle-expired-upload-receipts.repository.js';
 import { DrizzleIntakeAttachmentTransaction } from '../src/modules/attachments/infrastructure/persistence/drizzle/repositories/attachment/drizzle-intake-attachment-transaction.repository.js';
@@ -60,13 +65,20 @@ import { attachments } from '../src/modules/attachments/infrastructure/persisten
 import { DrizzleAttachmentCleanupUnitOfWork } from '../src/modules/attachments/infrastructure/persistence/drizzle/transactions/attachment/drizzle-attachment-cleanup.unit-of-work.js';
 import { AbandonProfileMedia } from '../src/modules/profile-media/application/use-cases/commands/media/abandon-profile-media/abandon-profile-media.use-case.js';
 import { ApplyProfileMediaChange } from '../src/modules/profile-media/application/use-cases/commands/media/apply-profile-media-change/apply-profile-media-change.use-case.js';
+import { SignProfileMediaTransfer } from '../src/modules/profile-media/application/use-cases/commands/media/sign-profile-media-transfer/sign-profile-media-transfer.use-case.js';
 import { ProfileMediaUpload } from '../src/modules/profile-media/domain/aggregates/media/profile-media-upload.aggregate.js';
 import { AesProfileMediaReceiptCipher } from '../src/modules/profile-media/infrastructure/adapters/crypto/aes-profile-media-receipt-cipher.adapter.js';
+import { S3ProfileMediaObjects } from '../src/modules/profile-media/infrastructure/adapters/object-storage/s3-profile-media-objects.adapter.js';
+import { PostgresProfileMediaRuntime } from '../src/modules/profile-media/infrastructure/adapters/runtime/postgres-profile-media-runtime.adapter.js';
 import {
   deleteExpiredProfileMediaReceipts,
   DrizzleProfileMediaCleanupTransaction,
 } from '../src/modules/profile-media/infrastructure/persistence/drizzle/repositories/media/drizzle-profile-media-cleanup-transaction.repository.js';
+import { DrizzleProfileMediaReconciliation } from '../src/modules/profile-media/infrastructure/persistence/drizzle/repositories/media/drizzle-profile-media-reconciliation.repository.js';
 import { DrizzleProfileMediaTransaction } from '../src/modules/profile-media/infrastructure/persistence/drizzle/repositories/media/drizzle-profile-media-transaction.repository.js';
+import { ReceiveUploadTransfer } from '../src/modules/upload-transfers/application/use-cases/commands/transfers/receive-upload-transfer/receive-upload-transfer.use-case.js';
+import { LocalUploadTransfer } from '../src/modules/upload-transfers/infrastructure/adapters/object-storage/local-upload-transfer.adapter.js';
+import { createLocalUploadTransferApplication } from '../src/modules/upload-transfers/upload-transfers.module.js';
 
 // The service as main.ts assembles it, on a disposable PostgreSQL and NATS.
 // `@cadenway/nest-testing` does not export its container fixtures yet and a service never depends
@@ -126,7 +138,13 @@ const profileTables = [
   'profile_media_uploads',
 ] as const;
 
-const serviceTables = [...attachmentTables, ...platformTables, ...profileTables].sort();
+const serviceTables = [
+  ...attachmentTables,
+  ...platformTables,
+  ...profileTables,
+  'upload_transfer_uses',
+].sort();
+const appliedMigrations = 9;
 
 /**
  * Runs `docker compose` on the throwaway project.
@@ -386,7 +404,7 @@ describe('storage-service wiring', () => {
         tableowner: 'storage_migrator',
       })),
     );
-    expect(journal.rows).toEqual([{ applied: 5 }]);
+    expect(journal.rows).toEqual([{ applied: appliedMigrations }]);
   });
 
   it('applies nothing when the migrator runs again', async () => {
@@ -395,7 +413,7 @@ describe('storage-service wiring', () => {
     const journal = await migrator.query<{ applied: number }>(
       'select count(*)::int as applied from drizzle.__drizzle_migrations',
     );
-    expect(journal.rows).toEqual([{ applied: 5 }]);
+    expect(journal.rows).toEqual([{ applied: appliedMigrations }]);
   });
 
   it('provisions all scheduled cleanup queues with the migrator', async () => {
@@ -446,9 +464,108 @@ describe('storage-service wiring', () => {
               ? 'attachment_reconciliation_system_access'
               : tablename === 'profile_media_cursors'
                 ? 'profile_media_cursors_system_access'
-                : `${tablename}_organization_isolation`,
+                : tablename === 'upload_transfer_uses'
+                  ? 'upload_transfer_uses_system_only'
+                  : `${tablename}_organization_isolation`,
         })),
     );
+  });
+
+  it('uses each staging grant once and makes uncertain S3 writes terminal', async () => {
+    const writes: Buffer[] = [];
+    let responseStatus = 200;
+    const bucket = createHttpServer((incoming, response) => {
+      const chunks: Buffer[] = [];
+      incoming.on('data', (chunk: Buffer) => {
+        chunks.push(chunk);
+      });
+      incoming.on('end', () => {
+        writes.push(Buffer.concat(chunks));
+        response.statusCode = responseStatus;
+        response.end();
+      });
+    });
+    bucket.listen(0, '127.0.0.1');
+    await once(bucket, 'listening');
+    const address = bucket.address();
+    if (address === null || typeof address === 'string') throw new Error('Missing test S3 port');
+    const endpoint = `http://127.0.0.1:${String(address.port)}`;
+    const transferUrl = `http://127.0.0.1${uploadTransferPath}`;
+    const config = loadConfig(appConfigSchema, {
+      ...process.env,
+      LOG_LEVEL: 'silent',
+      S3_ENDPOINT: endpoint,
+      S3_PUBLIC_ENDPOINT: endpoint,
+      S3_REGION: 'us-east-1',
+      S3_BUCKET: 'transfer-tests',
+      S3_ACCESS_KEY_ID: 'fixture',
+      S3_SECRET_ACCESS_KEY: 'fixture',
+      S3_FORCE_PATH_STYLE: 'true',
+      STORAGE_UPLOAD_TRANSFER_URL: transferUrl,
+      STORAGE_UPLOAD_RECEIPT_KEYS: JSON.stringify({
+        activeKeyId: 'fixture',
+        keys: [{ id: 'fixture', key: randomBytes(32).toString('base64url') }],
+      }),
+    });
+    const storage = config.objectStorage;
+    if (storage === undefined) throw new Error('Missing test S3 configuration');
+    const work: SystemTransactionRunner = service().get(SystemTransactionRunner);
+    const transfers = new LocalUploadTransfer(work, storage);
+    let relay: NestExpressApplication | undefined;
+    try {
+      relay = await createLocalUploadTransferApplication(
+        config,
+        new ReceiveUploadTransfer(transfers),
+      );
+      await relay.listen(0, '127.0.0.1');
+      const server = relay.getHttpServer();
+      await request(service().getHttpServer()).post(uploadTransferPath).expect(404);
+      await request(server).get('/health/ready').expect(404);
+      const ticketMaker = new UploadTransferTicket(transferUrl, storage.receiptKeys);
+      const issue = (key: string, expiresAt = new Date(Date.now() + 60_000)): string => {
+        const ticket = ticketMaker.issue({
+          key,
+          expiresAt: expiresAt.toISOString(),
+          contentType: 'text/plain',
+          sizeBytes: 3,
+        }).fields.ticket;
+        if (ticket === undefined) throw new Error('Missing test transfer ticket');
+        return ticket;
+      };
+      const upload = (ticket: string, content = 'abc') =>
+        request(server)
+          .post(uploadTransferPath)
+          .field('ticket', ticket)
+          .attach('file', Buffer.from(content), {
+            filename: 'test.txt',
+            contentType: 'text/plain',
+          });
+      const key = `intake/${randomUUID()}`;
+      const ticket = issue(key);
+      await upload(ticket, 'ab')
+        .expect('Content-Type', /application\/problem\+json/u)
+        .expect(400);
+      await upload(issue(`intake/${randomUUID()}`, new Date(Date.now() - 10_000))).expect(400);
+      expect(writes).toHaveLength(0);
+      const outcomes = await Promise.all([upload(ticket), upload(issue(key))]);
+      expect(outcomes.map(({ status }) => status).sort()).toEqual([204, 409]);
+      await upload(ticket).expect(409);
+      expect(writes).toEqual([Buffer.from('abc')]);
+
+      responseStatus = 503;
+      const uncertain = issue(`intake/${randomUUID()}`);
+      await upload(uncertain).expect(503);
+      await upload(uncertain).expect(409);
+      expect(writes).toEqual([Buffer.from('abc'), Buffer.from('abc')]);
+    } finally {
+      await relay?.close();
+      transfers.onApplicationShutdown();
+      await new Promise<void>((resolve) => {
+        bucket.close(() => {
+          resolve();
+        });
+      });
+    }
   });
 
   it('keeps account media out of logo tenant transactions and isolates organization logo owners', async () => {
@@ -620,6 +737,136 @@ describe('storage-service wiring', () => {
       await scope.client.query('delete from profile_media_owners where owner_id = $1', [owner.id]);
     });
   });
+  it('releases one page of profile media leases without settling stale credentials', async () => {
+    const owner = { kind: 'avatar', id: randomUUID() } as const;
+    const uploadId = randomUUID();
+    const objectIds = Array.from({ length: 4 }, () => randomUUID());
+    const system: SystemTransactionRunner = service().get(SystemTransactionRunner);
+    await system.run(async (scope) => {
+      await scope.client.query(
+        "insert into profile_media_owners (owner_kind, owner_id) values ('avatar', $1)",
+        [owner.id],
+      );
+      await scope.client.query(
+        `insert into profile_media_uploads (owner_kind, owner_id, upload_id, status)
+         values ('avatar', $1, $2, 'retired')`,
+        [owner.id, uploadId],
+      );
+      await scope.client.query(
+        `insert into profile_media_objects
+         (owner_kind, owner_id, upload_id, object_id, role, status, cleanup_after)
+         select 'avatar', $1, $2, id, 'candidate', 'active', now() - interval '1 minute'
+         from unnest($3::uuid[]) as objects(id)`,
+        [owner.id, uploadId, objectIds],
+      );
+
+      const cleanup = new DrizzleProfileMediaCleanupTransaction(scope, owner);
+      const [first, second, stale, differentLease] = await cleanup.claim(objectIds.length);
+      if (!first || !second || !stale || !differentLease) throw new Error('Incomplete claim.');
+      expect([first, second, stale, differentLease].map((lease) => lease.retention)).toEqual(
+        Array.from({ length: objectIds.length }, () => 'preserve'),
+      );
+      await expect(
+        cleanup.release([first, { ...second, owner: { ...owner, id: randomUUID() } }]),
+      ).rejects.toThrow('Profile cleanup owner mismatch.');
+      await cleanup.release([
+        first,
+        second,
+        { ...stale, generation: stale.generation - 1 },
+        { ...differentLease, leaseId: randomUUID() },
+      ]);
+      await cleanup.complete(first);
+      await cleanup.complete(differentLease);
+      const state = await scope.db.execute<{
+        object_id: string;
+        status: string;
+        lease_id: string | null;
+        generation: number;
+        delayed: boolean;
+      }>(sql`
+        select object_id, status, lease_id, generation, cleanup_after > clock_timestamp() as delayed
+        from profile_media_objects where owner_id = ${owner.id}
+      `);
+      const byObject = new Map(state.rows.map((row) => [row.object_id, row]));
+      for (const release of [first, second]) {
+        expect(byObject.get(release.objectId)).toMatchObject({
+          status: 'fenced',
+          lease_id: null,
+          generation: release.generation + 1,
+          delayed: true,
+        });
+      }
+      expect(byObject.get(stale.objectId)).toMatchObject({
+        status: 'fenced',
+        lease_id: stale.leaseId,
+        generation: stale.generation,
+        delayed: false,
+      });
+      expect(byObject.get(differentLease.objectId)).toMatchObject({
+        status: 'cleaned',
+        lease_id: null,
+        generation: differentLease.generation + 1,
+        delayed: false,
+      });
+      await scope.client.query('delete from profile_media_objects where owner_id = $1', [owner.id]);
+      await scope.client.query('delete from profile_media_uploads where owner_id = $1', [owner.id]);
+      await scope.client.query('delete from profile_media_owners where owner_id = $1', [owner.id]);
+    });
+  });
+
+  it('reconciles late profile media proofs only for definitively refused candidates', async () => {
+    const owner = { kind: 'avatar', id: randomUUID() } as const;
+    const uploadId = randomUUID();
+    const [refused, uncertain, retained] = [randomUUID(), randomUUID(), randomUUID()] as const;
+    const system: SystemTransactionRunner = service().get(SystemTransactionRunner);
+    const tenant: TenantTransactionRunner = service().get(TenantTransactionRunner);
+    const reconciliation = new DrizzleProfileMediaReconciliation(system, tenant);
+    await system.run(async ({ client }) => {
+      await client.query(
+        "insert into profile_media_owners (owner_kind, owner_id) values ('avatar', $1)",
+        [owner.id],
+      );
+      await client.query(
+        `insert into profile_media_uploads (owner_kind, owner_id, upload_id, status)
+         values ('avatar', $1, $2, 'retired')`,
+        [owner.id, uploadId],
+      );
+      await client.query(
+        `insert into profile_media_objects
+         (owner_kind, owner_id, upload_id, object_id, role, status, retention, cleanup_after)
+         values ('avatar', $1, $2, $3, 'candidate', 'cleaned', 'transient', now()),
+                ('avatar', $1, $2, $4, 'candidate', 'cleaned', 'candidate', now()),
+                ('avatar', $1, $2, $5, 'candidate', 'cleaned', 'preserve', now())`,
+        [owner.id, uploadId, refused, uncertain, retained],
+      );
+    });
+    try {
+      const observations = await reconciliation.resolve(
+        [refused, uncertain, retained, randomUUID()].map((objectId) => ({
+          role: 'candidate',
+          objectId,
+          transientOnly: true,
+        })),
+      );
+      expect(observations).toEqual([
+        { role: 'candidate', objectId: refused, uploadId, kind: owner.kind, ownerId: owner.id },
+      ]);
+      expect(await reconciliation.requeue(owner, observations)).toBe(1);
+      await system.run(async (scope) => {
+        const cleanup = new DrizzleProfileMediaCleanupTransaction(scope, owner);
+        expect(await cleanup.claim(3)).toEqual([
+          expect.objectContaining({ objectId: refused, retention: 'transient' }),
+        ]);
+      });
+    } finally {
+      await system.run(async ({ client }) => {
+        await client.query('delete from profile_media_objects where owner_id = $1', [owner.id]);
+        await client.query('delete from profile_media_uploads where owner_id = $1', [owner.id]);
+        await client.query('delete from profile_media_owners where owner_id = $1', [owner.id]);
+      });
+    }
+  });
+
   it('isolates attachment metadata, candidates, purge records, upload claims and byte entitlements by organization', async () => {
     const tenant = service().get(TenantTransactionRunner);
     const attachmentId = randomUUID();
@@ -1753,7 +2000,7 @@ describe('storage-service wiring', () => {
             ),
           ),
       },
-      { signUpload, copyAndVerify: vi.fn(), signDownload: vi.fn() },
+      { signUpload, copyAndVerify: vi.fn(), signDownload: vi.fn(), retainCandidate: vi.fn() },
       new PostgresAttachmentRuntime(tenant),
       { lookup: () => 'image/png' },
     );
@@ -1976,9 +2223,11 @@ describe('storage-service wiring', () => {
     expect(response.headers['cache-control']).toBe('no-store');
   });
 
-  it('seals and reads the original media receipt using the PostgreSQL retention clock', async () => {
+  it('retains the original media receipt and the elected candidate through retirement', async () => {
     const owner = { kind: 'avatar', id: randomUUID() } as const;
     const uploadId = '019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b98';
+    const candidateId = '019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b96';
+    const rejectedId = '019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b97';
     const now = new Date();
     const expiresAt = new Date(Math.floor(now.getTime() / 1_000) * 1_000 + 60_000);
     const upload = ProfileMediaUpload.reserve(
@@ -2010,6 +2259,8 @@ describe('storage-service wiring', () => {
       const lease = await uploads.claimSigning(owner, uploadId);
       if (lease === null) throw new Error('Media test lease unavailable.');
       expect(await uploads.completeSigning(owner, uploadId, lease, capability)).toBe(true);
+      await uploads.registerCandidate(owner, uploadId, candidateId, 'preserve');
+      await uploads.registerCandidate(owner, uploadId, rejectedId, 'candidate');
     });
     await runner.run(async (scope) => {
       const uploads = new DrizzleProfileMediaTransaction(scope, owner, cipher);
@@ -2022,6 +2273,39 @@ describe('storage-service wiring', () => {
         [owner.id, uploadId],
       );
       expect(receipt.rows).toEqual([{ retained: true }]);
+      const prepared = upload.prepare(
+        {
+          candidateId,
+          source: { contentType: 'image/png', sizeBytes: 24, width: 256, height: 256, frames: 1 },
+          derivative: {
+            contentType: 'image/png',
+            sizeBytes: 32,
+            width: 256,
+            height: 256,
+            metadataFree: true,
+          },
+        },
+        now,
+      );
+      expect(await uploads.electCandidate(prepared, candidateId)).toBe(true);
+      await uploads.scheduleCandidateCleanup(owner, uploadId, rejectedId);
+      await uploads.scheduleCandidateCleanup(owner, uploadId, candidateId);
+      await uploads.saveUpload(prepared.retire());
+      await uploads.scheduleCleanup(owner, uploadId);
+      const cleanup = new DrizzleProfileMediaCleanupTransaction(scope, owner);
+      expect(await cleanup.claim(3)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ objectId: candidateId, retention: 'preserve' }),
+          expect.objectContaining({ objectId: rejectedId, retention: 'transient' }),
+        ]),
+      );
+      await scope.client.query(
+        "update profile_media_objects set cleanup_after = statement_timestamp() where owner_id = $1 and role = 'staging'",
+        [owner.id],
+      );
+      expect(await cleanup.claim(3)).toEqual([
+        expect.objectContaining({ objectId: uploadId, retention: 'transient' }),
+      ]);
       await scope.client.query('delete from profile_media_receipts where owner_id = $1', [
         owner.id,
       ]);
@@ -2029,6 +2313,82 @@ describe('storage-service wiring', () => {
       await scope.client.query('delete from profile_media_uploads where owner_id = $1', [owner.id]);
       await scope.client.query('delete from profile_media_owners where owner_id = $1', [owner.id]);
     });
+  });
+
+  it('replays the original media grant after restart and refuses to reissue a pre-receipt staging key', async () => {
+    const owner = { kind: 'avatar', id: randomUUID() } as const;
+    const now = new Date();
+    const expiresAt = new Date(Math.floor(now.getTime() / 1_000) * 1_000 + 60_000);
+    const declaration = {
+      owner,
+      uploaderUserId: owner.id,
+      contentType: 'image/png',
+      sizeBytes: 24,
+      expiresAt,
+    };
+    const keyring = {
+      activeKeyId: 'fixture',
+      keys: [{ id: 'fixture', key: randomBytes(32).toString('base64url') }],
+    };
+    const cipher = new AesProfileMediaReceiptCipher(keyring.activeKeyId, keyring.keys);
+    const runner: SystemTransactionRunner = service().get(SystemTransactionRunner);
+    const runtime = new PostgresProfileMediaRuntime(runner);
+    const uploadId = await runtime.newId();
+    const pendingId = await runtime.newId();
+    const endpoint = `http://127.0.0.1${uploadTransferPath}`;
+    const original = new UploadTransferTicket(endpoint, keyring);
+    const capability = {
+      uploadId,
+      ...original.issue({
+        key: `profile-media/staging/${uploadId}`,
+        contentType: declaration.contentType,
+        sizeBytes: declaration.sizeBytes,
+        expiresAt: expiresAt.toISOString(),
+      }),
+    };
+    await runner.run(async (scope) => {
+      const uploads = new DrizzleProfileMediaTransaction(scope, owner, cipher);
+      await uploads.lockOwner(owner);
+      await uploads.insertUpload(ProfileMediaUpload.reserve({ ...declaration, uploadId }, now));
+      await uploads.insertUpload(
+        ProfileMediaUpload.reserve({ ...declaration, uploadId: pendingId }, now),
+      );
+      const lease = await uploads.claimSigning(owner, uploadId);
+      if (lease === null) throw new Error('Media test lease unavailable.');
+      expect(await uploads.completeSigning(owner, uploadId, lease, capability)).toBe(true);
+    });
+
+    vi.resetModules();
+    const restarted =
+      await import('../src/infrastructure/object-storage/upload-transfer-ticket.js');
+    const tickets = new restarted.UploadTransferTicket(endpoint, keyring);
+    const objects = new S3ProfileMediaObjects(
+      'profile-fixture',
+      { region: 'us-east-1' },
+      endpoint,
+      false,
+      tickets,
+    );
+    try {
+      const transfer = new SignProfileMediaTransfer(
+        {
+          run: (binding, work) =>
+            runner.run((scope) => work(new DrizzleProfileMediaTransaction(scope, binding, cipher))),
+        },
+        objects,
+        runtime,
+      );
+      const replay = await transfer.execute({ ...declaration, uploadId });
+      expect(replay.capability).toEqual(capability);
+      expect(tickets.open(replay.capability.fields.ticket ?? '')).toBeNull();
+      await expect(transfer.execute({ ...declaration, uploadId: pendingId })).rejects.toMatchObject(
+        {
+          reason: 'upload-expired',
+        },
+      );
+    } finally {
+      objects.onModuleDestroy();
+    }
   });
 
   it('refuses a token signed for another service', async () => {
@@ -2157,7 +2517,7 @@ describe('storage-service wiring', () => {
     const journal = await migrator.query<{ applied: number }>(
       'select count(*)::int as applied from drizzle.__drizzle_migrations',
     );
-    expect(journal.rows).toEqual([{ applied: 5 }]);
+    expect(journal.rows).toEqual([{ applied: appliedMigrations }]);
   });
 
   it('runs the outbox relay and marks an acknowledged event as sent', async () => {
@@ -2400,6 +2760,74 @@ describe('storage-service wiring', () => {
     );
   });
 
+  it('requeues hidden current and legacy Intake staging keys without touching retained candidates', async () => {
+    const system = service().get<SystemTransactionRunner>(SystemTransactionRunner);
+    const worker = new DrizzleIntakeAttachmentReconciliation(system);
+    const publicationId = randomUUID();
+    const attachmentId = randomUUID();
+    const transientKey = 'intake/019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b41';
+    const legacyKey = 'intake/019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b42';
+    const preservedKey = `org/${atelierNordId}/019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b43`;
+    await system.run(async ({ client }) => {
+      await client.query(
+        `insert into intake_attachments (organization_id, publication_id, id, status, decided_at)
+         values ($1, $2, $3, 'released', now())`,
+        [atelierNordId, publicationId, attachmentId],
+      );
+      for (const [objectKey, retention] of [
+        [transientKey, 'transient'],
+        [legacyKey, 'preserve'],
+        [preservedKey, 'preserve'],
+      ]) {
+        await client.query(
+          `insert into intake_attachment_candidates
+           (organization_id, publication_id, attachment_id, object_key, status, retention, cleanup_after)
+           values ($1, $2, $3, $4, 'cleaned', $5, now())`,
+          [atelierNordId, publicationId, attachmentId, objectKey, retention],
+        );
+      }
+    });
+    try {
+      const lease = await worker.acquire();
+      if (lease === null) throw new Error('The intake reconciliation lease was not acquired.');
+      expect(
+        await worker.complete(lease.id, {
+          objects: [
+            { objectKey: transientKey, transientOnly: true },
+            { objectKey: legacyKey, transientOnly: true },
+            { objectKey: preservedKey, transientOnly: true },
+          ],
+          next: null,
+        }),
+      ).toBe(2);
+      const rows = await system.run(({ client }) =>
+        client.query(
+          'select object_key, status, retention from intake_attachment_candidates where organization_id = $1 and publication_id = $2',
+          [atelierNordId, publicationId],
+        ),
+      );
+      expect(rows.rows).toEqual(
+        expect.arrayContaining([
+          { object_key: transientKey, status: 'fenced', retention: 'transient' },
+          { object_key: legacyKey, status: 'fenced', retention: 'transient' },
+          { object_key: preservedKey, status: 'cleaned', retention: 'preserve' },
+        ]),
+      );
+    } finally {
+      await system.run(async ({ client }) => {
+        await client.query(
+          'delete from intake_attachment_candidates where organization_id = $1 and publication_id = $2',
+          [atelierNordId, publicationId],
+        );
+        await client.query(
+          'delete from intake_attachments where organization_id = $1 and publication_id = $2',
+          [atelierNordId, publicationId],
+        );
+        await client.query("delete from attachment_reconciliation_cursors where scope = 'intake'");
+      });
+    }
+  });
+
   it('requeues only previously cleaned keys and advances the cursor under one live lease', async () => {
     const system = service().get<SystemTransactionRunner>(SystemTransactionRunner);
     const tenant = service().get(TenantTransactionRunner);
@@ -2410,11 +2838,24 @@ describe('storage-service wiring', () => {
     const elected = `org/${atelierNordId}/019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b12`;
     const foreign = `org/${otherOrganizationId}/019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b13`;
     const unknown = `org/${atelierNordId}/019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b14`;
+    const historical = `org/${atelierNordId}/019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b15`;
+    const protectedHistory = `org/${atelierNordId}/019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b16`;
+    const legacyStaging = `org/${atelierNordId}/019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b17`;
+    const otherFileKey = `org/${atelierNordId}/019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b18`;
     const inventory = {
-      objects: [known, elected, foreign, unknown].map((objectKey) => ({
-        organizationId: atelierNordId,
-        objectKey,
-      })),
+      objects: [
+        ...[known, elected, foreign, unknown].map((objectKey) => ({
+          organizationId: atelierNordId,
+          objectKey,
+        })),
+        { organizationId: atelierNordId, objectKey: historical, transientOnly: true as const },
+        { organizationId: atelierNordId, objectKey: legacyStaging, transientOnly: true as const },
+        {
+          organizationId: atelierNordId,
+          objectKey: protectedHistory,
+          transientOnly: true as const,
+        },
+      ],
       next: 'next-page',
     };
 
@@ -2423,15 +2864,25 @@ describe('storage-service wiring', () => {
         { key: known, organizationId: atelierNordId, status: 'cleaned' },
         { key: elected, organizationId: atelierNordId, status: 'elected' },
         { key: foreign, organizationId: otherOrganizationId, status: 'cleaned' },
+        { key: historical, organizationId: atelierNordId, status: 'cleaned' },
+        { key: protectedHistory, organizationId: atelierNordId, status: 'cleaned' },
+        { key: legacyStaging, organizationId: atelierNordId, status: 'cleaned' },
       ]) {
         const id = randomUUID();
         await client.query(
           `insert into attachments
              (organization_id, id, task_key, author_user_id, object_key, staging_object_key,
               file_name, content_type, size_bytes, status, version, reserved_at, expires_at)
-           values ($1, $2, $3, $4, $5, $5, 'sprint-14.png', 'image/png', 1, 'deleted', 1,
+           values ($1, $2, $3, $4, $5, $6, 'sprint-14.png', 'image/png', 1, 'deleted', 1,
                    clock_timestamp() - interval '2 hours', clock_timestamp() - interval '1 hour')`,
-          [row.organizationId, id, taskKey, camilleMartinId, row.key],
+          [
+            row.organizationId,
+            id,
+            taskKey,
+            camilleMartinId,
+            row.key === legacyStaging ? otherFileKey : row.key,
+            row.key,
+          ],
         );
         await client.query(
           `insert into attachment_candidates
@@ -2439,13 +2890,19 @@ describe('storage-service wiring', () => {
            values ($1, $2, $3, $4, clock_timestamp(), 4)`,
           [row.organizationId, id, row.key, row.status],
         );
+        if (row.key === historical) {
+          await client.query(
+            'update attachment_candidates set retention = $1 where organization_id = $2 and object_key = $3',
+            ['transient', row.organizationId, row.key],
+          );
+        }
       }
     });
 
     const removeFixtures = async (): Promise<void> => {
       await system.run(async ({ client }) => {
         await client.query('delete from attachment_candidates where object_key = any($1::text[])', [
-          [known, elected, foreign],
+          [known, elected, foreign, historical, protectedHistory, legacyStaging],
         ]);
         await client.query(
           'delete from attachments where organization_id = any($1::uuid[]) and task_key = $2',
@@ -2484,7 +2941,7 @@ describe('storage-service wiring', () => {
 
       await expect(
         system.run(async () => {
-          expect(await peer.complete(replacement.id, inventory)).toBe(1);
+          expect(await peer.complete(replacement.id, inventory)).toBe(3);
           throw new Error('Reconciliation fixture rolled back.');
         }),
       ).rejects.toThrow('Reconciliation fixture rolled back.');
@@ -2496,17 +2953,45 @@ describe('storage-service wiring', () => {
           [atelierNordId, known],
         );
         expect(rolledBack.rows).toEqual([{ status: 'cleaned', cleanup_generation: 4 }]);
-        expect(await peer.complete(replacement.id, inventory)).toBe(1);
+        expect(await peer.complete(replacement.id, inventory)).toBe(3);
         const rows = await client.query(
-          'select object_key, status, cleanup_generation from attachment_candidates where object_key = any($1::text[])',
-          [[known, elected, foreign, unknown]],
+          'select object_key, status, cleanup_generation, retention from attachment_candidates where object_key = any($1::text[])',
+          [[known, elected, foreign, unknown, historical, protectedHistory, legacyStaging]],
         );
-        expect(rows.rows).toHaveLength(3);
+        expect(rows.rows).toHaveLength(6);
         expect(rows.rows).toEqual(
           expect.arrayContaining([
-            { object_key: known, status: 'fenced', cleanup_generation: 5 },
-            { object_key: elected, status: 'elected', cleanup_generation: 4 },
-            { object_key: foreign, status: 'cleaned', cleanup_generation: 4 },
+            { object_key: known, status: 'fenced', cleanup_generation: 5, retention: 'preserve' },
+            {
+              object_key: elected,
+              status: 'elected',
+              cleanup_generation: 4,
+              retention: 'preserve',
+            },
+            {
+              object_key: foreign,
+              status: 'cleaned',
+              cleanup_generation: 4,
+              retention: 'preserve',
+            },
+            {
+              object_key: historical,
+              status: 'fenced',
+              cleanup_generation: 5,
+              retention: 'transient',
+            },
+            {
+              object_key: protectedHistory,
+              status: 'cleaned',
+              cleanup_generation: 4,
+              retention: 'preserve',
+            },
+            {
+              object_key: legacyStaging,
+              status: 'fenced',
+              cleanup_generation: 5,
+              retention: 'transient',
+            },
           ]),
         );
         await client.query(

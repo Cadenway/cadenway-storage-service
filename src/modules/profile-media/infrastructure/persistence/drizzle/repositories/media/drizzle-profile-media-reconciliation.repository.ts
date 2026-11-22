@@ -7,6 +7,7 @@ import type {
 import { and, eq, gt, isNull, lte, or, sql } from 'drizzle-orm';
 
 import type { ProfileMediaReconciliation } from '../../../../../application/ports/outbound/persistence/media/profile-media-reconciliation.port.js';
+import type { ProfileMediaObjectPage } from '../../../../../application/models/media/profile-media-object-page.model.js';
 import type { ProfileMediaReconciliationObservation } from '../../../../../application/models/media/profile-media-reconciliation-observation.model.js';
 import type { ProfileMediaOwnerBinding } from '../../../../../domain/value-objects/media/profile-media-owner-binding.value-object.js';
 import {
@@ -41,11 +42,14 @@ export class DrizzleProfileMediaReconciliation implements ProfileMediaReconcilia
         );
   }
   public resolve(
-    objects: readonly { readonly role: 'staging' | 'candidate'; readonly objectId: string }[],
+    objects: ProfileMediaObjectPage['objects'],
   ): Promise<readonly ProfileMediaReconciliationObservation[]> {
     if (objects.length === 0) return Promise.resolve([]);
     const keys = sql.join(
-      objects.map((item) => sql`(${item.role}::text, ${item.objectId}::uuid)`),
+      objects.map(
+        (item) =>
+          sql`(${item.role}::text, ${item.objectId}::uuid, ${item.transientOnly ?? false}::boolean)`,
+      ),
       sql`, `,
     );
     return this.system.run(
@@ -55,9 +59,9 @@ export class DrizzleProfileMediaReconciliation implements ProfileMediaReconcilia
           ProfileMediaReconciliationObservation & Record<string, unknown>
         >(sql`
         select ${table.ownerKind} as kind, ${table.ownerId} as "ownerId", ${table.uploadId} as "uploadId", ${table.objectId} as "objectId", ${table.role} as role
-        from ${table} join (values ${keys}) as observed(role, object_id)
+        from ${table} join (values ${keys}) as observed(role, object_id, transient_only)
           on ${table.role} = observed.role and ${table.objectId} = observed.object_id
-        where ${table.status} = 'cleaned'
+        where ${table.status} = 'cleaned' and (not observed.transient_only or ${table.retention} = 'transient')
       `);
         return rows.rows;
       },

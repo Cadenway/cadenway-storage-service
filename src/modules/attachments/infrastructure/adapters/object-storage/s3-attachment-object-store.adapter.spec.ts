@@ -35,7 +35,7 @@ const UTF8_SPLIT_PREFIX = Buffer.concat([Buffer.alloc(4_094, 0x61), Buffer.from(
 type Handler = S3Client['config']['requestHandler'];
 const stores: S3AttachmentObjectStore[] = [];
 
-function fixture(): {
+function fixture(eraseTransientVersions = false): {
   readonly handle: ReturnType<typeof vi.fn<Handler['handle']>>;
   readonly store: S3AttachmentObjectStore;
 } {
@@ -50,6 +50,7 @@ function fixture(): {
       requestHandler: { handle, destroy: vi.fn() },
     },
     'https://files.example.test',
+    eraseTransientVersions,
   );
   stores.push(store);
   return { handle, store };
@@ -150,7 +151,7 @@ describe('S3AttachmentObjectStore', () => {
           'continuation-token': 'opaque-previous',
         },
       });
-      await expect(store.deleteObject(CANDIDATE)).resolves.toBeUndefined();
+      await expect(store.deleteObject(CANDIDATE, 'preserve')).resolves.toBeUndefined();
       expect(recordedSuppression).toEqual([true, false]);
     } finally {
       context.disable();
@@ -201,6 +202,49 @@ describe('S3AttachmentObjectStore', () => {
     });
   });
 
+  it('switches inventory modes and carries the complete bounded S3 version cursor', async () => {
+    const { handle, store } = fixture(true);
+    const signal = new AbortController().signal;
+    handle.mockResolvedValueOnce(
+      response(
+        200,
+        {},
+        Buffer.from(
+          `<ListVersionsResult><IsTruncated>true</IsTruncated>
+            <NextKeyMarker>${STAGING}</NextKeyMarker><NextVersionIdMarker>generation-1</NextVersionIdMarker>
+            <DeleteMarker><Key>${STAGING}</Key><IsLatest>true</IsLatest></DeleteMarker>
+            <Version><Key>${STAGING}</Key><IsLatest>false</IsLatest></Version>
+            <Version><Key>${CANDIDATE}</Key><IsLatest>true</IsLatest></Version>
+            </ListVersionsResult>`,
+        ),
+      ),
+    );
+    handle.mockResolvedValueOnce(
+      response(
+        200,
+        {},
+        Buffer.from('<ListVersionsResult><IsTruncated>false</IsTruncated></ListVersionsResult>'),
+      ),
+    );
+
+    const page = await store.listAttachmentObjects('old-opaque-cursor', signal);
+    expect(page.objects).toEqual([
+      { organizationId: ORGANIZATION, objectKey: STAGING, transientOnly: true },
+      { organizationId: ORGANIZATION, objectKey: CANDIDATE },
+    ]);
+    expect(handle.mock.calls[0]?.[0]).toMatchObject({
+      query: { prefix: 'org/', versions: '', 'max-keys': '500' },
+    });
+    expect(page.next).not.toBeNull();
+    await expect(store.listAttachmentObjects(page.next, signal)).resolves.toEqual({
+      objects: [],
+      next: null,
+    });
+    expect(handle.mock.calls[1]?.[0]).toMatchObject({
+      query: { 'key-marker': STAGING, 'version-id-marker': 'generation-1' },
+    });
+  });
+
   it('signs the public origin, exact key, media type and size range into a short POST policy', async () => {
     vi.useFakeTimers({ now: new Date('2026-11-20T14:00:00.450Z') });
     const { handle, store } = fixture();
@@ -208,6 +252,7 @@ describe('S3AttachmentObjectStore', () => {
       attachmentId: ATTACHMENT,
       stagingKey: STAGING,
       contentType: 'image/png',
+      sizeBytes: PNG.length,
       expiresAt: new Date(Date.now() + 300_000),
     });
 
@@ -220,7 +265,7 @@ describe('S3AttachmentObjectStore', () => {
     });
     const policy: unknown = JSON.parse(Buffer.from(grant.fields.Policy ?? '', 'base64').toString());
     const conditions: unknown = expect.arrayContaining([
-      ['content-length-range', 1, MAX_FILE_BYTES],
+      ['content-length-range', 1, PNG.length],
       { bucket: 'attachment-test' },
       { key: STAGING },
       { 'Content-Type': 'image/png' },
@@ -239,6 +284,7 @@ describe('S3AttachmentObjectStore', () => {
         attachmentId: ATTACHMENT,
         stagingKey: STAGING,
         contentType: 'image/png',
+        sizeBytes: PNG.length,
         expiresAt: new Date(Date.now() - 1),
       }),
     ).rejects.toBeInstanceOf(AttachmentObjectStorageError);
@@ -253,11 +299,18 @@ describe('S3AttachmentObjectStore', () => {
       attachmentId: ATTACHMENT,
       stagingKey: INTAKE_STAGING,
       contentType: 'image/png',
+      sizeBytes: PNG.length,
       expiresAt: new Date('2026-11-20T14:00:46.000Z'),
     };
-    await expect(store.signIntakeUpload(input)).resolves.toMatchObject({
+    const grant = await store.signIntakeUpload(input);
+    expect(grant).toMatchObject({
       expiresAt: '2026-11-20T14:00:45.000Z',
       fields: { key: INTAKE_STAGING, 'Content-Type': 'image/png' },
+    });
+    const policy: unknown = JSON.parse(Buffer.from(grant.fields.Policy ?? '', 'base64').toString());
+    const conditions: unknown = expect.arrayContaining([['content-length-range', 1, PNG.length]]);
+    expect(policy).toMatchObject({
+      conditions,
     });
     await expect(store.signUpload(input)).rejects.toBeInstanceOf(AttachmentObjectStorageError);
     await expect(store.signIntakeUpload({ ...input, stagingKey: STAGING })).rejects.toBeInstanceOf(
@@ -280,7 +333,7 @@ describe('S3AttachmentObjectStore', () => {
       .mockResolvedValueOnce(partial(prefix, 8_192));
 
     await expect(
-      store.copyAndVerify({ stagingKey: STAGING, candidateKey: CANDIDATE }),
+      store.copyAndVerify({ stagingKey: STAGING, candidateKey: CANDIDATE, sizeBytes: 8_192 }),
     ).resolves.toEqual({
       sizeBytes: 8_192,
       contentType: 'image/png',
@@ -321,7 +374,7 @@ describe('S3AttachmentObjectStore', () => {
       .mockResolvedValueOnce(partial(text, text.length));
 
     await expect(
-      store.copyAndVerify({ stagingKey: STAGING, candidateKey: CANDIDATE }),
+      store.copyAndVerify({ stagingKey: STAGING, candidateKey: CANDIDATE, sizeBytes: text.length }),
     ).resolves.toEqual({
       sizeBytes: text.length,
       contentType: 'image/png',
@@ -345,10 +398,15 @@ describe('S3AttachmentObjectStore', () => {
         organizationId: FOREIGN_ORGANIZATION,
         stagingKey: INTAKE_STAGING,
         candidateKey: CANDIDATE,
+        sizeBytes: PNG.length,
       }),
     ).rejects.toBeInstanceOf(AttachmentObjectStorageError);
     await expect(
-      store.copyAndVerify({ stagingKey: INTAKE_STAGING, candidateKey: CANDIDATE }),
+      store.copyAndVerify({
+        stagingKey: INTAKE_STAGING,
+        candidateKey: CANDIDATE,
+        sizeBytes: PNG.length,
+      }),
     ).rejects.toBeInstanceOf(AttachmentObjectStorageError);
     expect(handle).not.toHaveBeenCalled();
 
@@ -357,6 +415,7 @@ describe('S3AttachmentObjectStore', () => {
         organizationId: ORGANIZATION,
         stagingKey: INTAKE_STAGING,
         candidateKey: CANDIDATE,
+        sizeBytes: PNG.length,
       }),
     ).resolves.toEqual({
       sizeBytes: PNG.length,
@@ -460,31 +519,46 @@ describe('S3AttachmentObjectStore', () => {
       .mockResolvedValueOnce(partial(prefix, sizeBytes));
 
     await expect(
-      store.copyAndVerify({ stagingKey: STAGING, candidateKey: CANDIDATE }),
+      store.copyAndVerify({ stagingKey: STAGING, candidateKey: CANDIDATE, sizeBytes }),
     ).resolves.toEqual({ sizeBytes, contentType, verifiedContentType });
   });
 
-  it('does not charge an oversized upload with a copy or content read', async () => {
+  it('does not copy staging bytes that exceed the reservation or hard limit', async () => {
     const { handle, store } = fixture();
-    handle.mockResolvedValueOnce(head(MAX_FILE_BYTES + 1, 'image/png', 'source'));
+    handle
+      .mockResolvedValueOnce(head(MAX_FILE_BYTES + 1, 'image/png', 'source'))
+      .mockResolvedValueOnce(head(PNG.length + 1, 'image/png', 'source'));
     await expect(
-      store.copyAndVerify({ stagingKey: STAGING, candidateKey: CANDIDATE }),
+      store.copyAndVerify({
+        stagingKey: STAGING,
+        candidateKey: CANDIDATE,
+        sizeBytes: MAX_FILE_BYTES,
+      }),
     ).resolves.toEqual({
       sizeBytes: MAX_FILE_BYTES + 1,
       contentType: 'image/png',
       verifiedContentType: null,
     });
-    expect(handle).toHaveBeenCalledTimes(1);
+    await expect(
+      store.copyAndVerify({ stagingKey: STAGING, candidateKey: CANDIDATE, sizeBytes: PNG.length }),
+    ).resolves.toEqual({
+      sizeBytes: PNG.length + 1,
+      contentType: 'image/png',
+      verifiedContentType: null,
+    });
+    expect(handle).toHaveBeenCalledTimes(2);
+    expect(handle.mock.calls[0]?.[0]).toMatchObject({ method: 'HEAD' });
+    expect(handle.mock.calls[1]?.[0]).toMatchObject({ method: 'HEAD' });
   });
 
   it('refuses cross-tenant pairs and source reuse before accessing S3', async () => {
     const { handle, store } = fixture();
     const foreign = CANDIDATE.replace(ORGANIZATION, FOREIGN_ORGANIZATION);
     await expect(
-      store.copyAndVerify({ stagingKey: STAGING, candidateKey: foreign }),
+      store.copyAndVerify({ stagingKey: STAGING, candidateKey: foreign, sizeBytes: PNG.length }),
     ).rejects.toBeInstanceOf(AttachmentObjectStorageError);
     await expect(
-      store.copyAndVerify({ stagingKey: STAGING, candidateKey: STAGING }),
+      store.copyAndVerify({ stagingKey: STAGING, candidateKey: STAGING, sizeBytes: PNG.length }),
     ).rejects.toBeInstanceOf(AttachmentObjectStorageError);
     expect(handle).not.toHaveBeenCalled();
   });
@@ -496,10 +570,10 @@ describe('S3AttachmentObjectStore', () => {
       .mockResolvedValueOnce(head(PNG.length, 'image/png', 'source'))
       .mockResolvedValueOnce(response(412));
     await expect(
-      store.copyAndVerify({ stagingKey: STAGING, candidateKey: CANDIDATE }),
+      store.copyAndVerify({ stagingKey: STAGING, candidateKey: CANDIDATE, sizeBytes: PNG.length }),
     ).resolves.toBeNull();
     await expect(
-      store.copyAndVerify({ stagingKey: STAGING, candidateKey: CANDIDATE }),
+      store.copyAndVerify({ stagingKey: STAGING, candidateKey: CANDIDATE, sizeBytes: PNG.length }),
     ).resolves.toBeNull();
     expect(handle).toHaveBeenCalledTimes(3);
   });
@@ -514,7 +588,7 @@ describe('S3AttachmentObjectStore', () => {
       .mockResolvedValueOnce(head(8_192, 'image/png', 'candidate'))
       .mockResolvedValueOnce(response(200, { 'content-length': '8192' }, body));
     await expect(
-      store.copyAndVerify({ stagingKey: STAGING, candidateKey: CANDIDATE }),
+      store.copyAndVerify({ stagingKey: STAGING, candidateKey: CANDIDATE, sizeBytes: 8_192 }),
     ).rejects.toBeInstanceOf(AttachmentObjectStorageError);
     expect(destroy).toHaveBeenCalled();
   });
@@ -545,9 +619,9 @@ describe('S3AttachmentObjectStore', () => {
       .mockResolvedValueOnce(response(204))
       .mockResolvedValueOnce(response(404))
       .mockRejectedValueOnce(new Error('Provider diagnostics with storage locations'));
-    await expect(store.deleteObject(CANDIDATE)).resolves.toBeUndefined();
-    await expect(store.deleteObject(CANDIDATE)).resolves.toBeUndefined();
-    await expect(store.deleteObject(CANDIDATE)).rejects.toThrow(
+    await expect(store.deleteObject(CANDIDATE, 'preserve')).resolves.toBeUndefined();
+    await expect(store.deleteObject(CANDIDATE, 'preserve')).resolves.toBeUndefined();
+    await expect(store.deleteObject(CANDIDATE, 'preserve')).rejects.toThrow(
       'Object storage could not process the attachment.',
     );
     expect(handle).toHaveBeenCalledTimes(3);
@@ -561,22 +635,38 @@ describe('S3AttachmentObjectStore', () => {
     const { handle, store } = fixture();
     handle.mockResolvedValueOnce(response(204)).mockResolvedValueOnce(response(404));
 
-    await expect(store.deleteObject(INTAKE_STAGING)).rejects.toBeInstanceOf(
+    await expect(store.deleteObject(INTAKE_STAGING, 'transient')).rejects.toBeInstanceOf(
       AttachmentObjectStorageError,
     );
     await expect(
-      store.deleteIntakeObject({ organizationId: FOREIGN_ORGANIZATION, objectKey: CANDIDATE }),
+      store.deleteIntakeObject({
+        organizationId: FOREIGN_ORGANIZATION,
+        objectKey: CANDIDATE,
+        retention: 'preserve',
+      }),
     ).rejects.toBeInstanceOf(AttachmentObjectStorageError);
     await expect(
-      store.deleteIntakeObject({ organizationId: 'invalid', objectKey: INTAKE_STAGING }),
+      store.deleteIntakeObject({
+        organizationId: 'invalid',
+        objectKey: INTAKE_STAGING,
+        retention: 'transient',
+      }),
     ).rejects.toBeInstanceOf(AttachmentObjectStorageError);
     expect(handle).not.toHaveBeenCalled();
 
     await expect(
-      store.deleteIntakeObject({ organizationId: ORGANIZATION, objectKey: INTAKE_STAGING }),
+      store.deleteIntakeObject({
+        organizationId: ORGANIZATION,
+        objectKey: INTAKE_STAGING,
+        retention: 'transient',
+      }),
     ).resolves.toBeUndefined();
     await expect(
-      store.deleteIntakeObject({ organizationId: ORGANIZATION, objectKey: CANDIDATE }),
+      store.deleteIntakeObject({
+        organizationId: ORGANIZATION,
+        objectKey: CANDIDATE,
+        retention: 'preserve',
+      }),
     ).resolves.toBeUndefined();
     expect(handle.mock.calls[0]?.[0]).toMatchObject({
       method: 'DELETE',
@@ -586,5 +676,109 @@ describe('S3AttachmentObjectStore', () => {
       method: 'DELETE',
       path: `/attachment-test/${CANDIDATE}`,
     });
+  });
+
+  it('erases all pages of exact-key versions and markers while leaving lookalike keys alone', async () => {
+    const { handle, store } = fixture(true);
+    const page = (elements: string) =>
+      response(200, {}, Buffer.from(`<ListVersionsResult>${elements}</ListVersionsResult>`));
+    const deleted = response(200, {}, Buffer.from('<DeleteResult/>'));
+    handle
+      .mockResolvedValueOnce(
+        page(
+          `<IsTruncated>true</IsTruncated><Version><Key>${STAGING}</Key><VersionId>first</VersionId></Version><DeleteMarker><Key>${STAGING}</Key><VersionId>marker</VersionId></DeleteMarker>`,
+        ),
+      )
+      .mockResolvedValueOnce(deleted)
+      .mockResolvedValueOnce(
+        page(
+          `<IsTruncated>false</IsTruncated><Version><Key>${STAGING}</Key><VersionId>second</VersionId></Version><Version><Key>${STAGING}-other</Key><VersionId>foreign</VersionId></Version>`,
+        ),
+      )
+      .mockResolvedValueOnce(deleted)
+      .mockResolvedValueOnce(
+        page(
+          `<IsTruncated>false</IsTruncated><Version><Key>${STAGING}-other</Key><VersionId>foreign</VersionId></Version>`,
+        ),
+      )
+      .mockResolvedValueOnce(page('<IsTruncated>false</IsTruncated>'));
+
+    await expect(store.deleteObject(STAGING, 'transient')).resolves.toBeUndefined();
+    expect(handle).toHaveBeenCalledTimes(6);
+    expect(handle.mock.calls[0]?.[0]).toMatchObject({
+      method: 'GET',
+      query: { prefix: STAGING, versions: '', 'max-keys': '100' },
+    });
+    const first: unknown = handle.mock.calls[1]?.[0];
+    const second: unknown = handle.mock.calls[3]?.[0];
+    expect(first).toMatchObject({ method: 'POST', query: { delete: '' } });
+    expect(first).toHaveProperty('body', expect.stringContaining('<VersionId>first</VersionId>'));
+    expect(first).toHaveProperty('body', expect.stringContaining('<VersionId>marker</VersionId>'));
+    expect(second).toHaveProperty('body', expect.stringContaining('<VersionId>second</VersionId>'));
+    expect(second).not.toHaveProperty('body', expect.stringContaining('foreign'));
+    expect(handle.mock.calls[5]?.[0]).toMatchObject({
+      query: { prefix: `attachment-restore-pins/${STAGING}`, versions: '' },
+    });
+  });
+
+  it('uses a delete marker for a restorable object even when transient version erasure is enabled', async () => {
+    const { handle, store } = fixture(true);
+    handle.mockResolvedValueOnce(response(204));
+    await expect(store.deleteObject(CANDIDATE, 'preserve')).resolves.toBeUndefined();
+    expect(handle).toHaveBeenCalledTimes(1);
+    expect(handle.mock.calls[0]?.[0]).toMatchObject({
+      method: 'DELETE',
+      path: `/attachment-test/${CANDIDATE}`,
+    });
+    expect(handle.mock.calls[0]?.[0]).not.toHaveProperty('query.versionId');
+  });
+
+  it('retries rather than erases when it cannot verify a candidate restore proof', async () => {
+    const { handle, store } = fixture(true);
+    handle.mockResolvedValueOnce(response(403));
+    await expect(store.deleteObject(CANDIDATE, 'candidate')).rejects.toBeInstanceOf(
+      AttachmentObjectStorageError,
+    );
+    expect(handle).toHaveBeenCalledTimes(1);
+    expect(handle.mock.calls[0]?.[0]).toMatchObject({
+      method: 'GET',
+      query: { prefix: `attachment-restore-pins/${CANDIDATE}`, versions: '' },
+    });
+  });
+
+  it('rejects an incomplete version listing before erasing a candidate', async () => {
+    const { handle, store } = fixture(true);
+    handle.mockResolvedValueOnce(response(200, {}, Buffer.from('<ListVersionsResult/>')));
+    await expect(store.deleteObject(CANDIDATE, 'candidate')).rejects.toBeInstanceOf(
+      AttachmentObjectStorageError,
+    );
+    expect(handle).toHaveBeenCalledOnce();
+  });
+
+  it('does not acknowledge a partial version deletion', async () => {
+    const { handle, store } = fixture(true);
+    handle
+      .mockResolvedValueOnce(
+        response(
+          200,
+          {},
+          Buffer.from(
+            `<ListVersionsResult><IsTruncated>false</IsTruncated><Version><Key>${STAGING}</Key><VersionId>first</VersionId></Version></ListVersionsResult>`,
+          ),
+        ),
+      )
+      .mockResolvedValueOnce(
+        response(
+          200,
+          {},
+          Buffer.from(
+            '<DeleteResult><Error><Code>AccessDenied</Code><VersionId>first</VersionId></Error></DeleteResult>',
+          ),
+        ),
+      );
+    await expect(store.deleteObject(STAGING, 'transient')).rejects.toBeInstanceOf(
+      AttachmentObjectStorageError,
+    );
+    expect(handle).toHaveBeenCalledTimes(2);
   });
 });

@@ -28,6 +28,7 @@ export class SignProfileMediaTransfer {
       const owner = await store.lockOwner(input.owner);
       if (owner.snapshot.deleted) throw new ProfileMediaError('not-found');
       let upload = await store.lockUpload(input.owner, input.uploadId);
+      const fresh = upload === null;
       if (upload === null) {
         upload = ProfileMediaUpload.reserve(input, this.runtime.now());
         await store.insertUpload(upload);
@@ -39,6 +40,10 @@ export class SignProfileMediaTransfer {
       if (capability !== null) return { capability, leaseId: null };
       const leaseId = await store.claimSigning(input.owner, input.uploadId);
       if (leaseId === null) throw new ProfileMediaError('request-in-progress');
+      // A restored pre-receipt reservation may already have issued its original grant.
+      if (!fresh && this.objects.oneShotUploads === true) {
+        throw new ProfileMediaError('upload-expired');
+      }
       return { capability: null, leaseId };
     });
     if (claim.capability !== null) return { capability: claim.capability };

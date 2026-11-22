@@ -1,10 +1,13 @@
 import type { TransactionScope } from '@cadenway/nest-common/database';
-import { eq, sql } from 'drizzle-orm';
+import { eq, sql, type SQL } from 'drizzle-orm';
 
 import type { StorageQuotaAdmission } from '../../../../../application/models/attachment/storage-quota-admission.model.js';
+import { MAX_ATTACHMENT_SIZE_BYTES } from '../../../../../domain/aggregates/attachment/attachment.aggregate.js';
 import { freeStorageEntitlement } from '../../../../../domain/policies/attachment/storage-entitlement.policy.js';
 import type { StorageEntitlement } from '../../../../../domain/value-objects/attachment/storage-entitlement.value-object.js';
+import { attachmentCandidates } from '../../schemas/attachment/attachment-candidates.schema.js';
 import { attachments } from '../../schemas/attachment/attachments.schema.js';
+import { intakeAttachmentCandidates } from '../../schemas/attachment/intake-attachment-candidates.schema.js';
 import { intakeAttachments } from '../../schemas/attachment/intake-attachments.schema.js';
 import { storageByteEntitlements } from '../../schemas/attachment/storage-byte-entitlements.schema.js';
 
@@ -37,8 +40,8 @@ export class DrizzleStorageQuota {
     this.locked = true;
   }
 
-  /** Reads the effective limit, ready files and verified Intake reservations in one snapshot. */
-  public async admission(): Promise<StorageQuotaAdmission> {
+  /** Measures all committed usage and includes outstanding capabilities for new reservations. */
+  public async admission(includeStaging = false): Promise<StorageQuotaAdmission> {
     this.requireLock();
     const result = await this.scope.db.execute<{ used_bytes: string; limit_bytes: string }>(sql`
       select (
@@ -53,7 +56,7 @@ export class DrizzleStorageQuota {
           from ${intakeAttachments}
           where ${intakeAttachments.organizationId} = ${this.organizationId}
             and ${intakeAttachments.status} = 'verified'
-        ), 0)
+        ), 0) ${includeStaging ? this.stagingBytes() : sql.empty()}
       )::text as used_bytes,
       coalesce((
         select ${storageByteEntitlements.limitBytes}
@@ -66,6 +69,34 @@ export class DrizzleStorageQuota {
       throw new Error('Storage quota usage could not be measured.');
     }
     return { usedBytes: BigInt(row.used_bytes), limitBytes: BigInt(row.limit_bytes) };
+  }
+
+  /** Legacy Intake objects without metadata retain the worst-case bound until expiry. */
+  private stagingBytes(): SQL {
+    return sql`
+      + coalesce((
+        select sum(${attachments.sizeBytes}::numeric)
+        from ${attachmentCandidates}
+        join ${attachments}
+          on ${attachmentCandidates.organizationId} = ${attachments.organizationId}
+          and ${attachmentCandidates.attachmentId} = ${attachments.id}
+        where ${attachmentCandidates.organizationId} = ${this.organizationId}
+          and ${attachmentCandidates.status} = 'staging'
+          and ${attachmentCandidates.cleanupAfter} > statement_timestamp()
+      ), 0)
+      + coalesce((
+        select sum(coalesce(${intakeAttachmentCandidates.stagingBytes},
+          ${intakeAttachments.sizeBytes}, ${MAX_ATTACHMENT_SIZE_BYTES})::numeric)
+        from ${intakeAttachmentCandidates}
+        join ${intakeAttachments}
+          on ${intakeAttachmentCandidates.organizationId} = ${intakeAttachments.organizationId}
+          and ${intakeAttachmentCandidates.publicationId} = ${intakeAttachments.publicationId}
+          and ${intakeAttachmentCandidates.attachmentId} = ${intakeAttachments.id}
+        where ${intakeAttachmentCandidates.organizationId} = ${this.organizationId}
+          and ${intakeAttachmentCandidates.status} = 'staging'
+          and ${intakeAttachmentCandidates.cleanupAfter} > statement_timestamp()
+      ), 0)
+    `;
   }
 
   /** Reads the latest committed Billing version after acquiring the tenant lock. */

@@ -26,7 +26,7 @@ export interface AttachmentTransaction {
   ): Promise<Attachment | null>;
 
   /** Inserts a pending reservation and stages cleanup of the upload key after expiry. */
-  insertReservation(attachment: Attachment): Promise<void>;
+  insertReservation(attachment: Attachment, oneShotUpload?: boolean): Promise<void>;
 
   /** Leases the scoped key until signing finishes, or resolves an unexpired claim. */
   claimUpload(
@@ -61,8 +61,8 @@ export interface AttachmentTransaction {
   /** Schedules cleanup of this still-active candidate without affecting another completion. */
   scheduleCandidateCleanup(attachmentId: string, candidateKey: string): Promise<void>;
 
-  /** Locks the tenant quota and reads ready bytes, reserved bytes and the effective limit. */
-  lockAndReadStorageAdmission(): Promise<StorageQuotaAdmission>;
+  /** Locks quota and optionally counts storage authorized by live staging capabilities. */
+  lockAndReadStorageAdmission(includeStaging?: boolean): Promise<StorageQuotaAdmission>;
 
   /** Locks the tenant quota before reading its current entitlement version and limit. */
   lockAndReadStorageEntitlement(): Promise<StorageEntitlement>;

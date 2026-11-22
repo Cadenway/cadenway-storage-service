@@ -16,6 +16,7 @@ import { jobQueues } from './config/job-queues.js';
 import { AttachmentsModule } from './modules/attachments/attachments.module.js';
 import { PlatformModule } from './modules/platform/platform.module.js';
 import { ProfileMediaModule } from './modules/profile-media/profile-media.module.js';
+import { UploadTransfersModule } from './modules/upload-transfers/upload-transfers.module.js';
 
 /**
  * Class AppModule
@@ -45,7 +46,8 @@ import { ProfileMediaModule } from './modules/profile-media/profile-media.module
  *   pg-boss schema provisioned by the migrator.
  * - `HealthModule`: `GET /health/live` answers as soon as the process runs; `GET /health/ready`
  *   answers 503 while PostgreSQL or NATS does not answer within 1 second, and from the start of a
- *   shutdown. Both routes are exempt from the internal token, every other route requires it.
+ *   shutdown. Both probes are exempt from the internal token. All other routes on this application
+ *   require an internal token. The opt-in local upload transport has a separate listener.
  *   `shutdownDelayMs` is 0: nothing that routes to this internal service reads its readiness.
  *   Callers reach it through the Docker DNS of the `internal` network, which keeps returning a
  *   stopping container until it exits, whatever its health (checked on Docker 28.2), and the GitOps
@@ -100,6 +102,7 @@ import { ProfileMediaModule } from './modules/profile-media/profile-media.module
     PlatformModule,
     AttachmentsModule,
     ProfileMediaModule,
+    UploadTransfersModule,
   ],
 })
 export class AppModule {}

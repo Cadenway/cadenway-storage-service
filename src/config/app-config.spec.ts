@@ -208,6 +208,7 @@ describe('appConfigSchema', () => {
       publicEndpoint: 'https://files.example.test',
       bucket: 'storage-test',
       forcePathStyle: false,
+      eraseTransientVersions: false,
       receiptKeys,
     });
     expect(
@@ -217,6 +218,39 @@ describe('appConfigSchema', () => {
         S3_FORCE_PATH_STYLE: 'true',
       }).objectStorage?.forcePathStyle,
     ).toBe(true);
+  });
+
+  it('requires an explicit versioned-bucket opt-in for permanent transient erasure', () => {
+    const config = {
+      ...complete,
+      ...configuredStorage,
+      S3_ERASE_TRANSIENT_VERSIONS: 'true',
+    };
+    expect(loadConfig(appConfigSchema, config).objectStorage?.eraseTransientVersions).toBe(true);
+    expect(() =>
+      loadConfig(appConfigSchema, { ...config, S3_ERASE_TRANSIENT_VERSIONS: 'yes' }),
+    ).toThrow(/S3_ERASE_TRANSIENT_VERSIONS:/u);
+  });
+
+  it('only enables the local upload transfer path on a configured loopback host', () => {
+    const config = { ...complete, ...configuredStorage };
+    const local = 'http://s3.cadenway.localhost/internal/v1/upload-transfers';
+    expect(
+      loadConfig(appConfigSchema, { ...config, STORAGE_UPLOAD_TRANSFER_URL: '' }).objectStorage
+        ?.uploadTransferUrl,
+    ).toBeUndefined();
+    expect(
+      loadConfig(appConfigSchema, { ...config, STORAGE_UPLOAD_TRANSFER_URL: local }).objectStorage
+        ?.uploadTransferUrl,
+    ).toBe(local);
+    for (const invalid of [
+      'https://s3.example.test/internal/v1/upload-transfers',
+      'http://127.0.0.1/wrong-path',
+    ]) {
+      expect(() =>
+        loadConfig(appConfigSchema, { ...config, STORAGE_UPLOAD_TRANSFER_URL: invalid }),
+      ).toThrow(/STORAGE_UPLOAD_TRANSFER_URL/u);
+    }
   });
 
   it('requires an encryption keyring before enabling object storage', () => {

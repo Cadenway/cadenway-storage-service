@@ -36,6 +36,34 @@
       "when": 1795277107047,
       "tag": "0004_storage_byte_entitlements",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1795353340871,
+      "tag": "0005_attachment_version_retention",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1795357430957,
+      "tag": "0006_profile_media_version_retention",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1795365963250,
+      "tag": "0007_intake_staging_byte_admission",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1795368616673,
+      "tag": "0008_one_shot_upload_transfers",
+      "breakpoints": true
     }
   ]
 }

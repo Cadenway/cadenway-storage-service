@@ -37,7 +37,7 @@ export interface ProfileMediaCleanupSweep {
   /** Acknowledges an exact object cleanup lease. */
   complete(lease: ProfileMediaCleanupLease): Promise<void>;
 
-  /** Releases an exact failed cleanup lease. */
-  release(lease: ProfileMediaCleanupLease): Promise<void>;
+  /** Releases an unfinished batch of exact cleanup leases for one owner. */
+  release(leases: readonly ProfileMediaCleanupLease[]): Promise<void>;
   // #endregion
 }

@@ -68,7 +68,8 @@ old asset, so the handler relies on event ID deduplication and the owner waterma
 
 ## Invariants
 
-- The signed multipart POST has one staging key, an exact media type, a 5 MiB source cap and an
+- The signed multipart POST has one staging key, an exact media type, the declared size as a
+  source cap (at most 5 MiB), and an
   expiry set by the owner, at most five minutes after reservation. An authorized replay preserves
   the original signed response and expiry.
 - Verify the declared type and size using one pinned source generation. Decode a static square
@@ -93,9 +94,20 @@ preserve the first accepted preparation.
 - Keep prepared derivatives pinned until an authoritative owner decision. Fence retired and
   abandoned candidates before erasure. Defer staging cleanup until the original signed expiry and
   reconcile late writes in bounded batches.
+- With version-aware cleanup enabled, write the immutable candidate's restore proof under
+  `attachment-restore-pins/profile-media/candidate/` before election. Older ledger entries and
+  candidates created in compatibility mode preserve history without a proof. Keep the proof and accepted
+  derivatives' S3 versions for the database backup retention window, including after retirement
+  or when a restored ledger predates election. Definitively refused candidates and their proofs
+  are disposable. Keep ambiguous election outcomes protected.
+- With `S3_ERASE_TRANSIENT_VERSIONS=true`, use bounded version-aware cleanup for expired staging
+  and disposable candidates. Inventory includes staging keys hidden by older delete markers.
+  Reconcile hidden candidates and late proofs only after a definite refusal. Leave objects
+  without a corresponding ledger entry untouched.
 - Keep the original sealed signing response for at least 24 hours, including after retirement
   while the uploader remains authorized. The response keeps its original expiry and cannot restart
   preparation. A deleted owner cannot access any receipt. Once their objects and receipts have
   been reclaimed, keep only the opaque upload fences needed to recognize late writes.
 - Process bounded owner batches in `storage.sweep-profile-media` and a separate leased inventory
-  page in `storage.reconcile-profile-media`. Only configured stores run the schedules.
+  page in `storage.reconcile-profile-media`. Release uncompleted object leases for retry when a
+  sweep fails or is cancelled. Only configured stores run the schedules.

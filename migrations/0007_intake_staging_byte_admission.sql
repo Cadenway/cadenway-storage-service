@@ -1,0 +1,2 @@
+ALTER TABLE "intake_attachment_candidates" ADD COLUMN "staging_bytes" integer;--> statement-breakpoint
+ALTER TABLE "intake_attachment_candidates" ADD CONSTRAINT "intake_attachment_candidates_staging_bytes_check" CHECK ("intake_attachment_candidates"."staging_bytes" is null or "intake_attachment_candidates"."staging_bytes" between 1 and 26214400);

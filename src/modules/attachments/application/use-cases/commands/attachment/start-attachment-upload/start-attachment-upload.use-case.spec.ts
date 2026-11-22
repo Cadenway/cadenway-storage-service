@@ -56,7 +56,9 @@ function fixture() {
     releaseUploadClaim: vi.fn<AttachmentTransaction['releaseUploadClaim']>(),
     registerCandidate: vi.fn<AttachmentTransaction['registerCandidate']>(),
     scheduleCandidateCleanup: vi.fn<AttachmentTransaction['scheduleCandidateCleanup']>(),
-    lockAndReadStorageAdmission: vi.fn<AttachmentTransaction['lockAndReadStorageAdmission']>(),
+    lockAndReadStorageAdmission: vi
+      .fn<AttachmentTransaction['lockAndReadStorageAdmission']>()
+      .mockResolvedValue({ usedBytes: 80n, limitBytes: 100n }),
     lockAndReadStorageEntitlement: vi.fn(),
     saveStorageEntitlement: vi.fn(),
     electCandidate: vi.fn<AttachmentTransaction['electCandidate']>(),
@@ -66,6 +68,7 @@ function fixture() {
   const objects = {
     signUpload: vi.fn<AttachmentObjectStore['signUpload']>().mockResolvedValue(signed),
     copyAndVerify: vi.fn<AttachmentObjectStore['copyAndVerify']>(),
+    retainCandidate: vi.fn<AttachmentObjectStore['retainCandidate']>(),
     signDownload: vi.fn<AttachmentObjectStore['signDownload']>(),
   } satisfies AttachmentObjectStore;
   const runtime = {
@@ -119,6 +122,7 @@ describe('StartAttachmentUpload', () => {
     expect(runtime.newId).not.toHaveBeenCalled();
     expect(mediaTypeForFile).not.toHaveBeenCalled();
     expect(store.insertReservation).not.toHaveBeenCalled();
+    expect(store.lockAndReadStorageAdmission).not.toHaveBeenCalled();
   });
 
   it('checks task revocation before reading a stored response', async () => {
@@ -151,6 +155,8 @@ describe('StartAttachmentUpload', () => {
     expect(store.lockTask).toHaveBeenCalledTimes(2);
     expect(store.claimUpload).toHaveBeenCalledTimes(1);
     expect(store.insertReservation).toHaveBeenCalledTimes(1);
+    expect(store.lockAndReadStorageAdmission).toHaveBeenCalledExactlyOnceWith(true);
+    expect(store.lockAndReadStorageAdmission).toHaveBeenCalledBefore(store.insertReservation);
     expect(store.insertReservation.mock.calls[0]?.[0].snapshot.expiresAt).toEqual(
       new Date(signed.expiresAt),
     );
@@ -162,6 +168,17 @@ describe('StartAttachmentUpload', () => {
       lease.claimId,
       result.capability,
     );
+  });
+
+  it('does not persist or return a capability over the available quota', async () => {
+    const { useCase, store } = fixture();
+    store.lockAndReadStorageAdmission.mockResolvedValueOnce({ usedBytes: 81n, limitBytes: 100n });
+
+    await expect(useCase.execute(input)).rejects.toMatchObject({
+      reason: 'storage-quota-exceeded',
+    });
+    expect(store.insertReservation).not.toHaveBeenCalled();
+    expect(store.releaseUploadClaim).toHaveBeenCalledOnce();
   });
 
   it('refuses competing requests while the winner signs outside the transaction', async () => {
@@ -239,7 +256,7 @@ describe('StartAttachmentUpload', () => {
 
     expect(mediaTypeForFile).toHaveBeenCalledWith('Atelier Nord.LOG');
     expect(objects.signUpload).toHaveBeenCalledWith(
-      expect.objectContaining({ contentType: 'text/plain' }),
+      expect.objectContaining({ contentType: 'text/plain', sizeBytes: input.sizeBytes }),
     );
   });
 });

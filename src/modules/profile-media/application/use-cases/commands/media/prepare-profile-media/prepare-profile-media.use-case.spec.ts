@@ -42,7 +42,7 @@ const verification = {
   },
 };
 
-function fixture() {
+function fixture(candidateRetention: ProfileMediaObjects['candidateRetention'] = 'candidate') {
   let ownerState = ProfileMediaOwner.empty(owner);
   let upload: ProfileMediaUpload | null = null;
   let storedCapability: typeof capability | null = null;
@@ -75,6 +75,7 @@ function fixture() {
       upload = value;
       return Promise.resolve(true);
     }),
+    scheduleCandidateCleanup: vi.fn().mockResolvedValue(undefined),
     scheduleCleanup: vi.fn().mockResolvedValue(undefined),
     scheduleOwnerCleanup: vi.fn().mockResolvedValue(undefined),
   } satisfies ProfileMediaTransaction;
@@ -83,9 +84,11 @@ function fixture() {
       fn(store),
   };
   const objects = {
+    candidateRetention,
     sign: vi.fn().mockResolvedValue(capability),
     readSource: vi.fn().mockResolvedValue(Buffer.alloc(10)),
     putCandidate: vi.fn().mockResolvedValue(undefined),
+    pinCandidateForRestore: vi.fn().mockResolvedValue(undefined),
     readCandidate: vi.fn().mockResolvedValue(png),
   } satisfies ProfileMediaObjects;
   const processor = {
@@ -139,9 +142,31 @@ describe('profile media operations', () => {
     expect(store.registerCandidate.mock.invocationCallOrder[0]).toBeLessThan(
       objects.putCandidate.mock.invocationCallOrder[0] ?? 0,
     );
+    expect(objects.pinCandidateForRestore).toHaveBeenCalledWith(
+      expect.objectContaining({ owner, uploadId, candidateId }),
+      undefined,
+    );
+    expect(objects.pinCandidateForRestore.mock.invocationCallOrder[0]).toBeLessThan(
+      store.electCandidate.mock.invocationCallOrder[0] ?? 0,
+    );
     runtime.now.mockReturnValue(new Date('2026-11-20T10:00:00Z'));
     expect(await useCase.execute(declaration)).toEqual(first);
     expect(objects.putCandidate).toHaveBeenCalledOnce();
+  });
+
+  it('preserves candidates registered while version-aware cleanup is disabled', async () => {
+    const { store, work, objects, processor, runtime } = fixture('preserve');
+    await new SignProfileMediaTransfer(work, objects, runtime).execute(declaration);
+    await expect(
+      new PrepareProfileMedia(work, objects, processor, runtime).execute(declaration),
+    ).resolves.toMatchObject({ preparation: { uploadId } });
+    expect(store.registerCandidate).toHaveBeenCalledExactlyOnceWith(
+      owner,
+      uploadId,
+      candidateId,
+      'preserve',
+    );
+    expect(objects.pinCandidateForRestore).not.toHaveBeenCalled();
   });
 
   it('bounds source reads and candidate reservations and releases the permit after a failure', async () => {
@@ -237,5 +262,38 @@ describe('profile media operations', () => {
     ).rejects.toMatchObject({ reason: 'upload-superseded' });
     expect(store.electCandidate).not.toHaveBeenCalled();
     expect(store.scheduleCleanup).toHaveBeenCalledOnce();
+    expect(store.scheduleCandidateCleanup).toHaveBeenCalledExactlyOnceWith(
+      owner,
+      uploadId,
+      candidateId,
+    );
+  });
+
+  it('discards a possibly written pin when the pin request fails before election', async () => {
+    const { store, work, objects, processor, runtime } = fixture();
+    await new SignProfileMediaTransfer(work, objects, runtime).execute(declaration);
+    const failure = new Error('pin response lost');
+    objects.pinCandidateForRestore.mockRejectedValueOnce(failure);
+    await expect(
+      new PrepareProfileMedia(work, objects, processor, runtime).execute(declaration),
+    ).rejects.toBe(failure);
+    expect(store.electCandidate).not.toHaveBeenCalled();
+    expect(store.scheduleCandidateCleanup).toHaveBeenCalledExactlyOnceWith(
+      owner,
+      uploadId,
+      candidateId,
+    );
+  });
+
+  it('keeps the pin if the election transaction has an uncertain outcome', async () => {
+    const { store, work, objects, processor, runtime } = fixture();
+    await new SignProfileMediaTransfer(work, objects, runtime).execute(declaration);
+    const failure = new Error('election outcome uncertain');
+    store.electCandidate.mockRejectedValueOnce(failure);
+    await expect(
+      new PrepareProfileMedia(work, objects, processor, runtime).execute(declaration),
+    ).rejects.toBe(failure);
+    expect(objects.pinCandidateForRestore).toHaveBeenCalledOnce();
+    expect(store.scheduleCandidateCleanup).not.toHaveBeenCalled();
   });
 });

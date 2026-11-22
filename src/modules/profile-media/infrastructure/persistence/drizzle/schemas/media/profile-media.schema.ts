@@ -142,6 +142,10 @@ export const profileMediaObjects = pgTable(
     objectId: uuid('object_id').notNull(),
     role: text('role').notNull(),
     status: text('status').notNull(),
+    retention: text('retention')
+      .$type<'preserve' | 'candidate' | 'transient'>()
+      .notNull()
+      .default('preserve'),
     cleanupAfter: instant('cleanup_after').notNull(),
     generation: integer('generation').notNull().default(0),
     leaseId: uuid('lease_id'),
@@ -175,6 +179,10 @@ export const profileMediaObjects = pgTable(
     check(
       'profile_media_objects_status_check',
       sql`${t.role} in ('staging','candidate') and ${t.status} in ('active','elected','fenced','cleaned')`,
+    ),
+    check(
+      'profile_media_objects_retention_check',
+      sql`${t.retention} in ('preserve','candidate','transient') and (${t.status} <> 'elected' or ${t.retention} = 'preserve')`,
     ),
     check(
       'profile_media_objects_identity_check',

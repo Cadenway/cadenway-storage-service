@@ -47,8 +47,11 @@ With byte admission enabled, authenticated finalization and Intake verification 
 verified bytes under the same tenant transaction lock. The quota counts ready files and verified
 Intake reservations. A tenant starts at the Free baseline of 2,000,000,000 bytes and uses its
 latest accepted Billing projection when present. A claim transfers its reservation to a ready
-file atomically. A verified reservation lasts until the authoritative claim or release. Rejected
-completion returns the opaque `409 attachment.storage-quota-exceeded` problem.
+file atomically. A verified reservation lasts until the authoritative claim or release. A new
+upload also charges the declared size of every outstanding Attachment and Intake staging
+capability. Its allowance remains charged until the signed deadline, including after upload
+completion or a terminal Task decision. A start or completion refused by byte admission returns
+the opaque `409 attachment.storage-quota-exceeded` problem.
 
 The P4 routes are defined in `openapi/internal/storage-service.yaml`.
 
@@ -125,7 +128,8 @@ consumption can start before enabling `STORAGE_BYTE_QUOTA_ENABLED`.
 ## Invariants
 
 - An upload authorizes a five-minute multipart POST to one staging key in the organization prefix
-  `org/<organizationId>/`, with a fixed media type and a file length from 1 byte to 25 MiB.
+  `org/<organizationId>/`, with a fixed media type and a file length bounded by the declared byte
+  count, up to 25 MiB. The staging length must match the declaration before a copy is attempted.
   The declared type must match the registered type of the final filename extension.
 - Finalization verifies the stored length and media type against the reservation. It checks up
   to the first 4 KiB using `file-type` and resolves the type from the detected format. For
@@ -178,13 +182,30 @@ The same schedules drain expired encrypted receipts from both paths and reconcil
 `org/` and opaque `intake/` inventories under independent cursor leases. The object storage policy
 needs to allow listing both prefixes when intake uploads are enabled.
 
+On a versioned attachment bucket, enable `S3_ERASE_TRANSIENT_VERSIONS` to inventory and erase
+transient history as well as current objects. The storage principal needs version list and delete
+permissions
+(`s3:ListBucketVersions` and `s3:DeleteObjectVersion`) and must be able to read and write
+the proof prefix below. Hidden versions or delete markers requeue only transient ledger entries and
+legacy keys identifiable as staging. This includes keys an older cleanup masked with a delete marker.
+The cleanup worker removes explicit
+versions and markers only after it commits a fence. Elected and unclassified pre-migration
+objects keep their history. An unclassified candidate is protected if an earlier completion
+wrote its zero-byte proof under `attachment-restore-pins/` before publishing the election. Keep
+the current proof objects outside expiration rules while their attachment history may be
+restored. The proofs are separate from the database and survive a rewind to before the election.
+If a backup contains a legacy candidate with no recorded retention policy, the additive migration
+gives it conservative preservation. Older service versions continue to use the same key shapes
+and leave the retention column's preservation default in effect for newly inserted rows.
+
 ## Decisions
 
 - Use the stable task key for attachment ownership through task moves. Storage does not import
   task-service data or resolve task permissions.
 - Sign transfers for the browser-facing object storage endpoint. Keep staged and finalized
-  objects separate. An upload capability may be used again until its expiry, so schedule staged
-  object cleanup after that expiry even if finalization has succeeded.
+  objects separate. Schedule staged object cleanup after expiry even if finalization has succeeded.
+  The optional local one-shot transport commits a durable admission before one staged write and
+  keeps the staging key for an additional 15 seconds after the transfer deadline.
 - Validate the object storage settings together at startup. In a local mode with all storage
   settings absent, starts, downloads and verification report object storage unavailable.
 - The entitlement table is additive. Older application versions continue to enforce their

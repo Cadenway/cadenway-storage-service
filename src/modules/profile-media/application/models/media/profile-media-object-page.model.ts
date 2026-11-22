@@ -5,6 +5,8 @@ export interface ProfileMediaObjectPage {
   readonly objects: readonly {
     readonly role: 'staging' | 'candidate';
     readonly objectId: string;
+    /** A hidden candidate or a proof can only requeue a definitively refused object. */
+    readonly transientOnly?: true;
   }[];
 
   /** The next provider token, or null once the scan completes. */

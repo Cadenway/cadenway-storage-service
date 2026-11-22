@@ -1,6 +1,8 @@
 import type { TransactionScope } from '@cadenway/nest-common/database';
 import { createHash } from 'node:crypto';
-import { and, eq, gt, isNull, lte, sql } from 'drizzle-orm';
+
+import { stagingTransferCleanupAfter } from '../../../../../../../infrastructure/object-storage/upload-transfer-ticket.js';
+import { and, eq, gt, inArray, isNull, lte, sql } from 'drizzle-orm';
 
 import type { StorageQuotaAdmission } from '../../../../../application/models/attachment/storage-quota-admission.model.js';
 import type { IntakeAttachmentIdentity } from '../../../../../application/models/intake-attachment/intake-attachment-identity.model.js';
@@ -143,9 +145,9 @@ export class DrizzleIntakeAttachmentTransaction implements IntakeAttachmentTrans
 
   // #region Methods
   /** Locks quota admission before measuring the current usage and reading its limit. */
-  public async lockAndReadStorageAdmission(): Promise<StorageQuotaAdmission> {
+  public async lockAndReadStorageAdmission(includeStaging = false): Promise<StorageQuotaAdmission> {
     await this.quota.lock();
-    return this.quota.admission();
+    return this.quota.admission(includeStaging);
   }
 
   /** Serializes even a missing allocation against release-before-start. */
@@ -202,7 +204,9 @@ export class DrizzleIntakeAttachmentTransaction implements IntakeAttachmentTrans
         attachmentId: state.id,
         objectKey: reservation.stagingObjectKey,
         status: 'staging',
-        cleanupAfter: reservation.expiresAt,
+        retention: 'transient',
+        cleanupAfter: reservation.uploadExpiresAt,
+        stagingBytes: reservation.sizeBytes,
       });
       attachment = proposed;
     }
@@ -288,6 +292,21 @@ export class DrizzleIntakeAttachmentTransaction implements IntakeAttachmentTrans
         .update(intakeAttachments)
         .set({ uploadExpiresAt: signedExpiry })
         .where(this.match(identity));
+      await this.scope.db
+        .update(intakeAttachmentCandidates)
+        .set({
+          cleanupAfter:
+            capability.fields.ticket === undefined
+              ? signedExpiry
+              : stagingTransferCleanupAfter(signedExpiry),
+        })
+        .where(
+          and(
+            this.matchCandidate(identity),
+            eq(intakeAttachmentCandidates.objectKey, reservation.stagingObjectKey),
+            eq(intakeAttachmentCandidates.status, 'staging'),
+          ),
+        );
       return { kind: 'completed' };
     }
     return (await this.readClaim(identity, digest)) ?? { kind: 'in-progress' };
@@ -320,11 +339,12 @@ export class DrizzleIntakeAttachmentTransaction implements IntakeAttachmentTrans
       attachmentId: identity.attachmentId,
       objectKey: candidateKey,
       status: 'active',
+      retention: 'candidate',
       cleanupAfter,
     });
   }
 
-  /** Schedules only this rejected unelected copy for the next cleanup sweep. */
+  /** Permanently rejects this attempt even if an expiry sweep already fenced it. */
   public async scheduleCandidateCleanup(
     identity: IntakeAttachmentIdentity,
     candidateKey: string,
@@ -332,12 +352,18 @@ export class DrizzleIntakeAttachmentTransaction implements IntakeAttachmentTrans
     this.requireLock(identity);
     await this.scope.db
       .update(intakeAttachmentCandidates)
-      .set({ cleanupAfter: sql`now()` })
+      .set({
+        status: 'fenced',
+        retention: 'transient',
+        cleanupAfter: sql`now()`,
+        cleanupGeneration: sql`${intakeAttachmentCandidates.cleanupGeneration} + 1`,
+      })
       .where(
         and(
           this.matchCandidate(identity),
           eq(intakeAttachmentCandidates.objectKey, candidateKey),
-          eq(intakeAttachmentCandidates.status, 'active'),
+          eq(intakeAttachmentCandidates.retention, 'candidate'),
+          inArray(intakeAttachmentCandidates.status, ['active', 'fenced', 'cleaned']),
         ),
       );
   }
@@ -364,12 +390,13 @@ export class DrizzleIntakeAttachmentTransaction implements IntakeAttachmentTrans
       throw new Error('Intake verification binding mismatch.');
     const elected = await this.scope.db
       .update(intakeAttachmentCandidates)
-      .set({ status: 'elected' })
+      .set({ status: 'elected', retention: 'preserve' })
       .where(
         and(
           this.matchCandidate(identity),
           eq(intakeAttachmentCandidates.objectKey, candidateKey),
           eq(intakeAttachmentCandidates.status, 'active'),
+          eq(intakeAttachmentCandidates.retention, 'candidate'),
         ),
       )
       .returning({ objectKey: intakeAttachmentCandidates.objectKey });

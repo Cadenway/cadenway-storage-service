@@ -7,8 +7,8 @@ describe('CleanIntakeAttachmentObjects', () => {
   it('erases fenced objects outside the tenant transaction and settles successes and failures', async () => {
     const cutoff = new Date('2026-11-20T10:00:00.000Z');
     const objects = [
-      { objectKey: 'intake/staging', generation: 1 },
-      { objectKey: 'org/tenant/candidate', generation: 2 },
+      { objectKey: 'intake/staging', generation: 1, retention: 'transient' },
+      { objectKey: 'org/tenant/candidate', generation: 2, retention: 'preserve' },
     ];
     const next = { cleanupAfter: cutoff, objectKey: 'org/tenant/candidate' };
     let transactionOpen = false;
@@ -51,6 +51,16 @@ describe('CleanIntakeAttachmentObjects', () => {
 
     expect(result).toEqual({ processed: 1, failed: 1, next });
     expect(fenceDueObjects).toHaveBeenCalledWith(cutoff, null, 50);
+    expect(deleteIntakeObject).toHaveBeenNthCalledWith(1, {
+      organizationId: 'tenant',
+      objectKey: objects[0]?.objectKey,
+      retention: 'transient',
+    });
+    expect(deleteIntakeObject).toHaveBeenNthCalledWith(2, {
+      organizationId: 'tenant',
+      objectKey: objects[1]?.objectKey,
+      retention: 'preserve',
+    });
     expect(settleObjectErasures).toHaveBeenCalledWith([
       { ...objects[0], erased: true },
       { ...objects[1], erased: false },
@@ -66,8 +76,8 @@ describe('CleanIntakeAttachmentObjects', () => {
           fenceDueObjects: () =>
             Promise.resolve({
               objects: [
-                { objectKey: 'intake/first', generation: 1 },
-                { objectKey: 'intake/second', generation: 1 },
+                { objectKey: 'intake/first', generation: 1, retention: 'transient' },
+                { objectKey: 'intake/second', generation: 1, retention: 'transient' },
               ],
               next: null,
             }),
@@ -88,7 +98,7 @@ describe('CleanIntakeAttachmentObjects', () => {
     ).rejects.toThrow('cancelled');
     expect(deleteIntakeObject).toHaveBeenCalledTimes(1);
     expect(settleObjectErasures).toHaveBeenCalledWith([
-      { objectKey: 'intake/first', generation: 1, erased: true },
+      { objectKey: 'intake/first', generation: 1, retention: 'transient', erased: true },
     ]);
   });
 });

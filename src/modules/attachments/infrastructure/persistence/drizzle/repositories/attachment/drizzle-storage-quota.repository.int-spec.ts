@@ -80,6 +80,83 @@ describe('storage verified byte admission', () => {
     compose('down', '--volumes', '--remove-orphans');
   });
 
+  it('accounts for live staging across both upload paths until the signed deadline', async () => {
+    const tenantId = randomUUID();
+    const attachmentId = randomUUID();
+    const intakeId = randomUUID();
+    await inOrganization(tenantId, () =>
+      tenant.run(async (scope) => {
+        await scope.client.query(
+          `insert into attachments
+             (organization_id, id, task_key, author_user_id, object_key, staging_object_key,
+              file_name, content_type, size_bytes, status, scan_status, version, reserved_at, expires_at)
+           values ($1, $2, 'CAD-1', $3, 'normal-object', 'normal-staging',
+                   'normal.txt', 'text/plain', 10, 'ready', 'verified', 1, now(),
+                   now() + interval '5 minutes')`,
+          [tenantId, attachmentId, actorId],
+        );
+        await scope.client.query(
+          `insert into attachment_candidates
+             (organization_id, attachment_id, object_key, status, cleanup_after, retention)
+           values ($1, $2, 'normal-staging', 'staging', now() + interval '5 minutes', 'transient'),
+                  ($1, $2, 'expired-staging', 'staging', now() - interval '1 minute', 'transient')`,
+          [tenantId, attachmentId],
+        );
+        await scope.client.query(
+          `insert into intake_attachments
+             (organization_id, publication_id, id, status, staging_object_key, file_name,
+              content_type, size_bytes, reserved_at, expires_at, upload_expires_at)
+           values ($1, $2, $3, 'pending', 'intake-staging', 'intake.txt', 'text/plain', 20,
+                   now(), now() + interval '1 day', now() + interval '4 minutes')`,
+          [tenantId, publicationId, intakeId],
+        );
+        await scope.client.query(
+          `insert into intake_attachment_candidates
+             (organization_id, publication_id, attachment_id, object_key, status, cleanup_after,
+              retention, staging_bytes)
+           values ($1, $2, $3, 'intake-staging', 'staging', now() + interval '4 minutes', 'transient', 20)`,
+          [tenantId, publicationId, intakeId],
+        );
+        const transaction = new DrizzleAttachmentTransaction(scope, tenantId, vi.fn(), undefined);
+        await expect(transaction.lockAndReadStorageAdmission()).resolves.toMatchObject({
+          usedBytes: 10n,
+        });
+        await expect(transaction.lockAndReadStorageAdmission(true)).resolves.toMatchObject({
+          usedBytes: 40n,
+        });
+        await scope.client.query(
+          `update intake_attachments
+           set status = 'released', staging_object_key = null, file_name = null, content_type = null,
+               size_bytes = null, reserved_at = null, expires_at = null, upload_expires_at = null,
+               decided_at = now()
+           where organization_id = $1 and publication_id = $2 and id = $3`,
+          [tenantId, publicationId, intakeId],
+        );
+        await expect(transaction.lockAndReadStorageAdmission(true)).resolves.toMatchObject({
+          usedBytes: 40n,
+        });
+        await scope.client.query(
+          `update intake_attachment_candidates
+           set staging_bytes = null
+           where organization_id = $1 and publication_id = $2 and attachment_id = $3`,
+          [tenantId, publicationId, intakeId],
+        );
+        await expect(transaction.lockAndReadStorageAdmission(true)).resolves.toMatchObject({
+          usedBytes: 20n + 25n * 1024n * 1024n,
+        });
+        await scope.client.query(
+          `update intake_attachment_candidates
+           set cleanup_after = now() - interval '1 minute'
+           where organization_id = $1 and publication_id = $2 and attachment_id = $3`,
+          [tenantId, publicationId, intakeId],
+        );
+        await expect(transaction.lockAndReadStorageAdmission(true)).resolves.toMatchObject({
+          usedBytes: 20n,
+        });
+      }),
+    );
+  });
+
   it('schedules only the refused copies for cleanup before their reservations expire', async () => {
     const normalId = '01938f6e-0000-7000-8000-000000000005';
     const intakeId = '01938f6e-0000-7000-8000-000000000006';
@@ -108,17 +185,30 @@ describe('storage verified byte admission', () => {
           );
           for (const [index, key] of keys.entries()) {
             await scope.client.query(
-              `insert into attachment_candidates (organization_id, attachment_id, object_key, status, cleanup_after)
-               values ($1, $2, $3, $4, now() + interval '1 day')`,
-              [tenantId, normalId, key, index === 2 ? 'elected' : 'active'],
+              `insert into attachment_candidates (organization_id, attachment_id, object_key, status, cleanup_after, retention)
+               values ($1, $2, $3, $4, now() + interval '1 day', $5)`,
+              [
+                tenantId,
+                normalId,
+                key,
+                index === 0 ? 'cleaned' : index === 1 ? 'active' : 'elected',
+                index === 2 ? 'preserve' : 'candidate',
+              ],
             );
           }
           for (const [index, key] of intakeKeys.entries()) {
             await scope.client.query(
               `insert into intake_attachment_candidates
-               (organization_id, publication_id, attachment_id, object_key, status, cleanup_after)
-               values ($1, $2, $3, $4, $5, now() + interval '1 day')`,
-              [tenantId, publicationId, intakeId, key, index === 2 ? 'elected' : 'active'],
+               (organization_id, publication_id, attachment_id, object_key, status, cleanup_after, retention)
+               values ($1, $2, $3, $4, $5, now() + interval '1 day', $6)`,
+              [
+                tenantId,
+                publicationId,
+                intakeId,
+                key,
+                index === 0 ? 'fenced' : index === 1 ? 'active' : 'elected',
+                index === 2 ? 'preserve' : 'candidate',
+              ],
             );
           }
         }),
@@ -161,6 +251,10 @@ describe('storage verified byte admission', () => {
       expect(result.intake.objects.map(({ objectKey }) => objectKey)).toEqual(
         tenantId === organizationId ? ['intake-rejected'] : [],
       );
+      if (tenantId === organizationId) {
+        expect(result.normal.objects[0]?.retention).toBe('transient');
+        expect(result.intake.objects[0]?.retention).toBe('transient');
+      }
     }
   });
 

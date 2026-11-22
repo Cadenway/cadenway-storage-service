@@ -53,6 +53,7 @@ function fixture(
   readonly work: AttachmentUnitOfWork;
   readonly committed: ReturnType<typeof vi.fn>;
   readonly copy: ReturnType<typeof vi.fn<AttachmentObjectStore['copyAndVerify']>>;
+  readonly retainCandidate: ReturnType<typeof vi.fn<AttachmentObjectStore['retainCandidate']>>;
 } {
   let attachment = initial;
   const registerCandidate = vi.fn<AttachmentTransaction['registerCandidate']>();
@@ -102,8 +103,12 @@ function fixture(
       verifiedContentType: 'image/png',
     }),
   );
+  const retainCandidate = vi
+    .fn<AttachmentObjectStore['retainCandidate']>()
+    .mockResolvedValue(undefined);
   const objects: AttachmentObjectStore = {
     copyAndVerify: copy,
+    retainCandidate,
     signUpload: vi.fn(),
     signDownload: vi.fn(),
   };
@@ -119,6 +124,7 @@ function fixture(
     work,
     committed,
     copy,
+    retainCandidate,
     useCase: new CompleteAttachmentUpload(
       work,
       objects,
@@ -139,6 +145,7 @@ describe('CompleteAttachmentUpload', () => {
       electCandidate,
       appendFact,
       copy,
+      retainCandidate,
     } = fixture(reservation(), () => now, 20n);
     const first = await useCase.execute(input);
     const second = await useCase.execute(input);
@@ -149,6 +156,10 @@ describe('CompleteAttachmentUpload', () => {
       copy.mock.invocationCallOrder[0] ?? 0,
     );
     expect(electCandidate).toHaveBeenCalledTimes(1);
+    expect(retainCandidate).toHaveBeenCalledTimes(1);
+    expect(retainCandidate.mock.invocationCallOrder[0]).toBeLessThan(
+      electCandidate.mock.invocationCallOrder[0] ?? 0,
+    );
     expect(lockAndReadStorageAdmission).toHaveBeenCalledOnce();
     expect(appendFact).toHaveBeenCalledTimes(1);
   });
@@ -243,14 +254,37 @@ describe('CompleteAttachmentUpload', () => {
   it('reports expiry when cleanup discards the reservation while storage is responding', async () => {
     let currentTime = now;
     const pending = reservation();
-    const { useCase, copy, lockAttachment, appendFact } = fixture(pending, () => currentTime);
+    const { useCase, copy, lockAttachment, appendFact, retainCandidate, scheduleCandidateCleanup } =
+      fixture(pending, () => currentTime);
     copy.mockImplementationOnce(() => {
       currentTime = expiresAt;
       lockAttachment.mockResolvedValueOnce(pending.expire(expiresAt));
-      return Promise.resolve(null);
+      return Promise.resolve({
+        sizeBytes: 20,
+        contentType: 'image/png',
+        verifiedContentType: 'image/png',
+      });
     });
 
     await expect(useCase.execute(input)).rejects.toMatchObject({ reason: 'upload-expired' });
+    expect(retainCandidate).toHaveBeenCalledOnce();
+    expect(scheduleCandidateCleanup).toHaveBeenCalledExactlyOnceWith(
+      attachmentId,
+      `org/${organizationId}/${candidateId}`,
+    );
     expect(appendFact).not.toHaveBeenCalled();
+  });
+  it('leaves the copy unelected when independent restore evidence cannot be recorded', async () => {
+    const { useCase, retainCandidate, electCandidate, appendFact, scheduleCandidateCleanup } =
+      fixture(reservation(), () => now);
+    retainCandidate.mockRejectedValueOnce(new Error('Storage is unavailable'));
+
+    await expect(useCase.execute(input)).rejects.toThrow('Storage is unavailable');
+    expect(electCandidate).not.toHaveBeenCalled();
+    expect(appendFact).not.toHaveBeenCalled();
+    expect(scheduleCandidateCleanup).toHaveBeenCalledExactlyOnceWith(
+      attachmentId,
+      `org/${organizationId}/${candidateId}`,
+    );
   });
 });

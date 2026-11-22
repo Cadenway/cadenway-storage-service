@@ -1,8 +1,10 @@
 import type { TransactionScope } from '@cadenway/nest-common/database';
-import { and, eq, isNull, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 
+import { stagingTransferCleanupAfter } from '../../../../../../../infrastructure/object-storage/upload-transfer-ticket.js';
 import type { ProfileMediaTransaction } from '../../../../../application/models/media/profile-media-transaction.model.js';
 import type { ProfileMediaCapability } from '../../../../../application/models/media/profile-media-capability.model.js';
+import type { ProfileMediaCandidateRetention } from '../../../../../application/models/media/profile-media-candidate-retention.model.js';
 import { ProfileMediaOwner } from '../../../../../domain/aggregates/media/profile-media-owner.aggregate.js';
 import { ProfileMediaUpload } from '../../../../../domain/aggregates/media/profile-media-upload.aggregate.js';
 import type { ProfileMediaOwnerBinding } from '../../../../../domain/value-objects/media/profile-media-owner-binding.value-object.js';
@@ -139,6 +141,7 @@ export class DrizzleProfileMediaTransaction implements ProfileMediaTransaction {
       objectId: state.uploadId,
       role: 'staging',
       status: 'active',
+      retention: 'transient',
       cleanupAfter: state.declaration.expiresAt,
     });
   }
@@ -274,6 +277,19 @@ export class DrizzleProfileMediaTransaction implements ProfileMediaTransaction {
         ),
       )
       .returning({ uploadId: profileMediaReceipts.uploadId });
+    if (rows.length === 1 && capability.fields.ticket !== undefined) {
+      await this.scope.db
+        .update(profileMediaObjects)
+        .set({ cleanupAfter: stagingTransferCleanupAfter(declaration.expiresAt) })
+        .where(
+          and(
+            this.where(profileMediaObjects),
+            eq(profileMediaObjects.uploadId, uploadId),
+            eq(profileMediaObjects.role, 'staging'),
+            eq(profileMediaObjects.status, 'active'),
+          ),
+        );
+    }
     return rows.length === 1;
   }
 
@@ -301,6 +317,7 @@ export class DrizzleProfileMediaTransaction implements ProfileMediaTransaction {
     owner: ProfileMediaOwnerBinding,
     uploadId: string,
     candidateId: string,
+    retention: ProfileMediaCandidateRetention,
   ): Promise<void> {
     if (candidateId.toLowerCase() === uploadId.toLowerCase())
       throw new Error('Candidate identity must differ from staging.');
@@ -313,6 +330,7 @@ export class DrizzleProfileMediaTransaction implements ProfileMediaTransaction {
       objectId: candidateId,
       role: 'candidate',
       status: 'active',
+      retention,
       cleanupAfter: upload.snapshot.declaration.expiresAt,
     });
   }
@@ -324,7 +342,7 @@ export class DrizzleProfileMediaTransaction implements ProfileMediaTransaction {
     if (state.status !== 'prepared' || state.derivative.candidateId !== candidateId) return false;
     const result = await this.scope.db
       .update(profileMediaObjects)
-      .set({ status: 'elected' })
+      .set({ status: 'elected', retention: 'preserve' })
       .where(
         and(
           this.where(profileMediaObjects),
@@ -332,6 +350,7 @@ export class DrizzleProfileMediaTransaction implements ProfileMediaTransaction {
           eq(profileMediaObjects.objectId, candidateId),
           eq(profileMediaObjects.role, 'candidate'),
           eq(profileMediaObjects.status, 'active'),
+          inArray(profileMediaObjects.retention, ['candidate', 'preserve']),
         ),
       )
       .returning({ objectId: profileMediaObjects.objectId });
@@ -349,6 +368,35 @@ export class DrizzleProfileMediaTransaction implements ProfileMediaTransaction {
       );
     await this.saveUpload(upload);
     return true;
+  }
+
+  /** Reclaims a candidate whose election was definitively refused under the owner lock. */
+  public async scheduleCandidateCleanup(
+    owner: ProfileMediaOwnerBinding,
+    uploadId: string,
+    candidateId: string,
+  ): Promise<void> {
+    this.check(owner);
+    await this.scope.db
+      .update(profileMediaObjects)
+      .set({
+        status: 'fenced',
+        retention: 'transient',
+        cleanupAfter: sql`clock_timestamp()`,
+        generation: sql`${profileMediaObjects.generation} + 1`,
+        leaseId: null,
+        leasedUntil: null,
+      })
+      .where(
+        and(
+          this.where(profileMediaObjects),
+          eq(profileMediaObjects.uploadId, uploadId),
+          eq(profileMediaObjects.objectId, candidateId),
+          eq(profileMediaObjects.role, 'candidate'),
+          eq(profileMediaObjects.retention, 'candidate'),
+          inArray(profileMediaObjects.status, ['active', 'fenced', 'cleaned']),
+        ),
+      );
   }
 
   /** Cancels only unfinished signing, preserving the original sealed receipt until expiry. */
