@@ -13,4 +13,6 @@ paths:
 - Controllers validate and map inputs and outputs around a use case call. Keep logic and repository
   access outside controllers.
 - Errors use the common format of `@cadenway/nest-common` with a stable machine `code`.
-- Every route requires the internal token and the organization context (guards of nest-common).
+- Every internal API route requires the internal token and the organization context (guards of
+  nest-common). The separate opt-in browser listener exposes only the contracted upload transfer
+  route, authorized by its single-use ticket.

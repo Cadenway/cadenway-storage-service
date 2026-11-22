@@ -54,7 +54,7 @@ export class LocalUploadTransfer implements UploadTransfer {
 
   // #region Methods
   /** Releases any connections held by the object store SDK. */
-  public onModuleDestroy(): void {
+  public onApplicationShutdown(): void {
     this.client?.destroy();
   }
 

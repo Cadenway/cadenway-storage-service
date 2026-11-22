@@ -3,7 +3,8 @@ import { rmdir, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { CONFIG, ProblemException, SkipInternalToken } from '@cadenway/nest-common';
+import { ReceiveUploadTransferInternalBody } from '@cadenway/contracts/validators/internal/storage-service';
+import { ProblemException } from '@cadenway/nest-common';
 import {
   Body,
   Controller,
@@ -16,10 +17,10 @@ import {
   UseInterceptors,
   type CallHandler,
   type ExecutionContext,
+  type OnApplicationShutdown,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { finalize, type Observable } from 'rxjs';
-import { z } from 'zod';
 
 import {
   maximumTransferBytes,
@@ -27,7 +28,7 @@ import {
 } from '../../../../application/models/transfers/upload-transfer.model.js';
 import { ReceiveUploadTransfer } from '../../../../application/use-cases/commands/transfers/receive-upload-transfer/receive-upload-transfer.use-case.js';
 
-const transferFields = z.strictObject({ ticket: z.string() });
+const transferFields = ReceiveUploadTransferInternalBody.pick({ ticket: true }).strict();
 
 interface MultipartRequest {
   // #region Properties
@@ -46,25 +47,24 @@ interface MultipartRequest {
 
 /** Bounds local file intake by elapsed time, disk usage and concurrent requests. */
 @Injectable()
-export class LocalUploadTransferMultipart {
+export class LocalUploadTransferMultipart implements OnApplicationShutdown {
   // #region Properties
-  /** Private temporary directory created only in local transfer mode. */
-  private readonly directory: string | undefined;
+  /** Private temporary directory owned by this listener. */
+  private readonly directory: string;
 
   /** Bounded multipart parser used only for the transfer entry point. */
   private readonly parser;
 
   /** Allocated intake slots, including requests awaiting temporary file removal. */
   private active = 0;
+
+  /** Temporary file removals still pending after their HTTP responses. */
+  private readonly removals = new Set<Promise<void>>();
   // #endregion
 
   // #region Constructor
-  /** Assigns a parser only when the operator configures a browser-local target. */
-  public constructor(
-    @Inject(CONFIG) config: Readonly<{ objectStorage?: { readonly uploadTransferUrl?: string } }>,
-    @Inject(ReceiveUploadTransfer) transfer: ReceiveUploadTransfer,
-  ) {
-    if (config.objectStorage?.uploadTransferUrl === undefined) return;
+  /** Validates admission before writing the file part to its private spool. */
+  public constructor(@Inject(ReceiveUploadTransfer) transfer: ReceiveUploadTransfer) {
     this.directory = mkdtempSync(join(tmpdir(), 'cadenway-upload-transfer-'));
     const Parser = FileInterceptor('file', {
       dest: this.directory,
@@ -96,9 +96,6 @@ export class LocalUploadTransferMultipart {
     context: ExecutionContext,
     next: CallHandler,
   ): Promise<Observable<unknown>> {
-    if (this.parser === undefined) {
-      throw new ProblemException({ status: 404, code: 'request.not-found' });
-    }
     if (this.active >= 2) {
       throw new ProblemException({ status: 503, code: 'storage.unavailable' });
     }
@@ -123,8 +120,9 @@ export class LocalUploadTransferMultipart {
   }
 
   /** Removes the private spool directory once its requests have finished. */
-  public async onModuleDestroy(): Promise<void> {
-    if (this.directory !== undefined) await rmdir(this.directory).catch(() => undefined);
+  public async onApplicationShutdown(): Promise<void> {
+    await Promise.all(this.removals);
+    await rmdir(this.directory).catch(() => undefined);
   }
 
   /** Erases the scoped file before freeing its intake slot. */
@@ -133,11 +131,13 @@ export class LocalUploadTransferMultipart {
       this.active -= 1;
       return;
     }
-    void unlink(request.file.path)
+    const removal: Promise<void> = unlink(request.file.path)
       .catch(() => undefined)
       .finally(() => {
+        this.removals.delete(removal);
         this.active -= 1;
       });
+    this.removals.add(removal);
   }
   // #endregion
 }
@@ -155,7 +155,6 @@ export class LocalUploadTransferController {
   // #region Methods
   /** Returns only the stable result of the one-shot staging operation. */
   @Post()
-  @SkipInternalToken()
   @HttpCode(204)
   @Header('Access-Control-Allow-Origin', '*')
   @Header('Cache-Control', 'private, no-store')

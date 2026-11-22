@@ -125,7 +125,8 @@ const optionalProjectionCursorSecret = z
  *   together with `STORAGE_UPLOAD_RECEIPT_KEYS` when object storage is configured.
  *   `S3_FORCE_PATH_STYLE` and `S3_ERASE_TRANSIENT_VERSIONS` default to false. Enable transient
  *   version erasure for a versioned object bucket with version-list and version-delete access.
- *   `STORAGE_UPLOAD_TRANSFER_URL` optionally enables a one-shot upload relay on loopback.
+ *   `STORAGE_UPLOAD_TRANSFER_URL` optionally enables the dedicated listener for a browser-local
+ *   one-shot upload relay.
  *   Without any storage settings, the service runs with signed transfers unavailable.
  *
  * `OTEL_EXPORTER_OTLP_ENDPOINT` is read by `telemetry.ts` before the application exists.

@@ -7,7 +7,6 @@ import { fileURLToPath } from 'node:url';
 
 import type { SubscriptionChangedV1 } from '@cadenway/contracts/events/billing-service';
 import {
-  CONFIG,
   createApplication,
   InternalTokenSigner,
   loadConfig,
@@ -19,7 +18,7 @@ import type {
   OrganizationContext,
 } from '@cadenway/nest-common';
 import { SystemTransactionRunner, TenantTransactionRunner } from '@cadenway/nest-common/database';
-import { Controller, Get, Global, Injectable, Module } from '@nestjs/common';
+import { Controller, Get, Injectable, Module } from '@nestjs/common';
 import type { BeforeApplicationShutdown } from '@nestjs/common';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { and, eq, sql } from 'drizzle-orm';
@@ -77,7 +76,9 @@ import {
 } from '../src/modules/profile-media/infrastructure/persistence/drizzle/repositories/media/drizzle-profile-media-cleanup-transaction.repository.js';
 import { DrizzleProfileMediaReconciliation } from '../src/modules/profile-media/infrastructure/persistence/drizzle/repositories/media/drizzle-profile-media-reconciliation.repository.js';
 import { DrizzleProfileMediaTransaction } from '../src/modules/profile-media/infrastructure/persistence/drizzle/repositories/media/drizzle-profile-media-transaction.repository.js';
-import { UploadTransfersModule } from '../src/modules/upload-transfers/upload-transfers.module.js';
+import { ReceiveUploadTransfer } from '../src/modules/upload-transfers/application/use-cases/commands/transfers/receive-upload-transfer/receive-upload-transfer.use-case.js';
+import { LocalUploadTransfer } from '../src/modules/upload-transfers/infrastructure/adapters/object-storage/local-upload-transfer.adapter.js';
+import { createLocalUploadTransferApplication } from '../src/modules/upload-transfers/upload-transfers.module.js';
 
 // The service as main.ts assembles it, on a disposable PostgreSQL and NATS.
 // `@cadenway/nest-testing` does not export its container fixtures yet and a service never depends
@@ -492,6 +493,7 @@ describe('storage-service wiring', () => {
     const transferUrl = `http://127.0.0.1${uploadTransferPath}`;
     const config = loadConfig(appConfigSchema, {
       ...process.env,
+      LOG_LEVEL: 'silent',
       S3_ENDPOINT: endpoint,
       S3_PUBLIC_ENDPOINT: endpoint,
       S3_REGION: 'us-east-1',
@@ -508,32 +510,17 @@ describe('storage-service wiring', () => {
     const storage = config.objectStorage;
     if (storage === undefined) throw new Error('Missing test S3 configuration');
     const work: SystemTransactionRunner = service().get(SystemTransactionRunner);
-    @Global()
-    @Module({
-      providers: [
-        { provide: CONFIG, useValue: config },
-        { provide: SystemTransactionRunner, useValue: work },
-      ],
-      exports: [CONFIG, SystemTransactionRunner],
-    })
-    class UploadTransferTestConfig {}
-    @Module({ imports: [UploadTransferTestConfig, UploadTransfersModule] })
-    class UploadTransferTestModule {}
+    const transfers = new LocalUploadTransfer(work, storage);
     let relay: NestExpressApplication | undefined;
     try {
-      relay = await createApplication(UploadTransferTestModule, {
-        service: 'storage-service',
+      relay = await createLocalUploadTransferApplication(
         config,
-        internalToken: {
-          verifier: {
-            audience: config.INTERNAL_TOKEN_AUDIENCE,
-            trustedIssuers: config.INTERNAL_TOKEN_TRUSTED_ISSUERS,
-          },
-        },
-        logDestination: { write: (): void => undefined },
-      });
-      await relay.init();
+        new ReceiveUploadTransfer(transfers),
+      );
+      await relay.listen(0, '127.0.0.1');
       const server = relay.getHttpServer();
+      await request(service().getHttpServer()).post(uploadTransferPath).expect(404);
+      await request(server).get('/health/ready').expect(404);
       const ticketMaker = new UploadTransferTicket(transferUrl, storage.receiptKeys);
       const issue = (key: string, expiresAt = new Date(Date.now() + 60_000)): string => {
         const ticket = ticketMaker.issue({
@@ -555,7 +542,9 @@ describe('storage-service wiring', () => {
           });
       const key = `intake/${randomUUID()}`;
       const ticket = issue(key);
-      await upload(ticket, 'ab').expect(400);
+      await upload(ticket, 'ab')
+        .expect('Content-Type', /application\/problem\+json/u)
+        .expect(400);
       await upload(issue(`intake/${randomUUID()}`, new Date(Date.now() - 10_000))).expect(400);
       expect(writes).toHaveLength(0);
       const outcomes = await Promise.all([upload(ticket), upload(issue(key))]);
@@ -570,6 +559,7 @@ describe('storage-service wiring', () => {
       expect(writes).toEqual([Buffer.from('abc'), Buffer.from('abc')]);
     } finally {
       await relay?.close();
+      transfers.onApplicationShutdown();
       await new Promise<void>((resolve) => {
         bucket.close(() => {
           resolve();

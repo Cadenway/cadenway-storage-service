@@ -9,8 +9,9 @@ authorization, finalization and cleanup.
 ## Public entry points
 
 `POST /internal/v1/upload-transfers` receives a multipart form containing one opaque `ticket`
-and one `file`. The authenticated ticket replaces the internal token for this route. A loopback
-development proxy can expose this path alone. The deployed configuration leaves it disabled.
+and one `file`. The browser reaches it through a local development proxy on a dedicated
+listener at port 3016. The ticket authorizes the transfer. The internal API listener never mounts
+this route. Hosted configurations leave the browser listener disabled.
 
 ## Persistence
 
@@ -30,6 +31,8 @@ page of expired records.
   tickets, including receipts restored from an earlier database dump. A replayed reservation
   can return its previous ticket, so start a new reservation after a restart. Profile owners
   allocate UUIDv7 values on the same host clock and must also allocate a fresh ID after a restart.
+- The parent service drains the browser listener before shutting down the shared database pool and
+  the transfer's S3 client.
 
 ## Events
 
