@@ -494,11 +494,21 @@ export class S3AttachmentObjectStore
           verifiedContentType: null,
         };
       }
+      const observedVersion = staged.VersionId;
+      const source = `${this.bucket}/${stagingKey}`;
+      // Version-aware storage can copy the inspected version even if a new staging write arrives.
+      const copySource =
+        this.eraseTransientVersions &&
+        observedVersion !== undefined &&
+        observedVersion !== '' &&
+        observedVersion !== 'null'
+          ? `${source}?versionId=${encodeURIComponent(observedVersion)}`
+          : source;
       const copy = await this.storage.send(
         new CopyObjectCommand({
           Bucket: this.bucket,
           Key: candidateKey,
-          CopySource: `${this.bucket}/${stagingKey}`,
+          CopySource: copySource,
           CopySourceIfMatch: objectVersion(staged),
           IfNoneMatch: '*',
         }),
