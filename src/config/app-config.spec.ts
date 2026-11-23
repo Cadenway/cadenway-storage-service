@@ -221,6 +221,19 @@ describe('appConfigSchema', () => {
     ).toBe(true);
   });
 
+  it.each(['S3_ENDPOINT', 'S3_PUBLIC_ENDPOINT', 'STORAGE_UPLOAD_TRANSFER_URL'] as const)(
+    'reports a malformed %s as a configuration issue without displaying its value',
+    (setting) => {
+      const invalid = 'invalid-endpoint-fixture';
+      const environment = { ...complete, ...configuredStorage, [setting]: invalid };
+      const load = () => loadConfig(appConfigSchema, environment);
+
+      expect(load).toThrow(ConfigError);
+      expect(load).toThrow(new RegExp(`${setting}:`, 'u'));
+      expect(load).not.toThrow(invalid);
+    },
+  );
+
   it('requires an explicit versioned-bucket opt-in for permanent transient erasure', () => {
     const config = {
       ...complete,

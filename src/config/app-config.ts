@@ -14,8 +14,8 @@ export const uploadTransferPath = '/internal/v1/upload-transfers';
 const storageEndpoint = z
   .url({ protocol: /^https?$/u, error: 'Expected an HTTP or HTTPS object storage endpoint.' })
   .refine((value) => {
-    const url = new URL(value);
-    return !url.username && !url.password && !url.search && !url.hash;
+    const url = URL.parse(value);
+    return url !== null && !url.username && !url.password && !url.search && !url.hash;
   }, 'Object storage endpoints cannot contain credentials, queries or fragments.');
 
 const storageValue = z
@@ -23,8 +23,9 @@ const storageValue = z
   .refine((value) => value.trim().length > 0, 'Expected a non-empty object storage setting.');
 
 const localUploadTransferUrl = storageEndpoint.refine((value) => {
-  const url = new URL(value);
+  const url = URL.parse(value);
   return (
+    url !== null &&
     (url.hostname === '127.0.0.1' ||
       url.hostname === '[::1]' ||
       url.hostname === 'localhost' ||
