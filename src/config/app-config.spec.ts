@@ -209,6 +209,7 @@ describe('appConfigSchema', () => {
       bucket: 'storage-test',
       forcePathStyle: false,
       eraseTransientVersions: false,
+      uploadTransfer: { mode: 'presigned-post' },
       receiptKeys,
     });
     expect(
@@ -219,6 +220,19 @@ describe('appConfigSchema', () => {
       }).objectStorage?.forcePathStyle,
     ).toBe(true);
   });
+
+  it.each(['S3_ENDPOINT', 'S3_PUBLIC_ENDPOINT', 'STORAGE_UPLOAD_TRANSFER_URL'] as const)(
+    'reports a malformed %s as a configuration issue without displaying its value',
+    (setting) => {
+      const invalid = 'invalid-endpoint-fixture';
+      const environment = { ...complete, ...configuredStorage, [setting]: invalid };
+      const load = () => loadConfig(appConfigSchema, environment);
+
+      expect(load).toThrow(ConfigError);
+      expect(load).toThrow(new RegExp(`${setting}:`, 'u'));
+      expect(load).not.toThrow(invalid);
+    },
+  );
 
   it('requires an explicit versioned-bucket opt-in for permanent transient erasure', () => {
     const config = {
@@ -232,18 +246,31 @@ describe('appConfigSchema', () => {
     ).toThrow(/S3_ERASE_TRANSIENT_VERSIONS:/u);
   });
 
-  it('only enables the local upload transfer path on a configured loopback host', () => {
+  it('selects provider-signed forms without enabling a browser listener by default', () => {
     const config = { ...complete, ...configuredStorage };
-    const local = 'http://s3.cadenway.localhost/internal/v1/upload-transfers';
     expect(
       loadConfig(appConfigSchema, { ...config, STORAGE_UPLOAD_TRANSFER_URL: '' }).objectStorage
-        ?.uploadTransferUrl,
-    ).toBeUndefined();
+        ?.uploadTransfer,
+    ).toEqual({ mode: 'presigned-post' });
+    expect(
+      loadConfig(appConfigSchema, { ...config, STORAGE_UPLOAD_TRANSFER_MODE: 'presigned-post' })
+        .objectStorage?.uploadTransfer,
+    ).toEqual({ mode: 'presigned-post' });
+  });
+
+  it('only enables one-shot transfers on an explicitly configured loopback host', () => {
+    const config = {
+      ...complete,
+      ...configuredStorage,
+      STORAGE_UPLOAD_TRANSFER_MODE: 'local-one-shot',
+    };
+    const local = 'http://s3.cadenway.localhost/internal/v1/upload-transfers';
     expect(
       loadConfig(appConfigSchema, { ...config, STORAGE_UPLOAD_TRANSFER_URL: local }).objectStorage
-        ?.uploadTransferUrl,
-    ).toBe(local);
+        ?.uploadTransfer,
+    ).toEqual({ mode: 'local-one-shot', url: local });
     for (const invalid of [
+      '',
       'https://s3.example.test/internal/v1/upload-transfers',
       'http://127.0.0.1/wrong-path',
     ]) {
@@ -251,6 +278,18 @@ describe('appConfigSchema', () => {
         loadConfig(appConfigSchema, { ...config, STORAGE_UPLOAD_TRANSFER_URL: invalid }),
       ).toThrow(/STORAGE_UPLOAD_TRANSFER_URL/u);
     }
+  });
+
+  it('rejects a relay URL when configured for provider-signed forms', () => {
+    const config = {
+      ...complete,
+      ...configuredStorage,
+      STORAGE_UPLOAD_TRANSFER_URL: 'http://127.0.0.1:3016/internal/v1/upload-transfers',
+    };
+    expect(() => loadConfig(appConfigSchema, config)).toThrow(/STORAGE_UPLOAD_TRANSFER_MODE/u);
+    expect(() =>
+      loadConfig(appConfigSchema, { ...config, STORAGE_UPLOAD_TRANSFER_MODE: 'presigned-post' }),
+    ).toThrow(/STORAGE_UPLOAD_TRANSFER_MODE/u);
   });
 
   it('requires an encryption keyring before enabling object storage', () => {

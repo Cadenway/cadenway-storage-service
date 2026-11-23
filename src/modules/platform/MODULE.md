@@ -6,7 +6,7 @@ Gives the tables of the service kit their place in this service's own migrations
 `src/modules/*/infrastructure/persistence/drizzle/schemas/*/*.schema.ts` only. A kit table enters the migration history through a schema re-export in this module. It owns:
 
 - `outbox_events`, `processed_events` and `event_versions`, defined by
-  `@cadenway/nest-messaging/outbox`;
+  `@cadenway/nest-messaging/outbox/schema`;
 - `idempotency_keys`, defined by `@cadenway/nest-common/database`.
 
 It holds no business rule, no use case, no route and no handler, and never will: product data and
@@ -30,6 +30,11 @@ transaction runners.
 
 Created by `migrations/0000_platform_tables.sql`, owned by the migrator role `storage_migrator`. The
 application role `storage_app` reads and writes their rows and holds no DDL right on them.
+
+`0009_outbox_leases` adds the nullable lease fields. The migrator builds the partial index
+concurrently and validates both checks after the schema transaction. The current writer and
+relay keep their pending/sent behavior. An application rollback leaves this additive schema in
+place.
 
 ## API
 

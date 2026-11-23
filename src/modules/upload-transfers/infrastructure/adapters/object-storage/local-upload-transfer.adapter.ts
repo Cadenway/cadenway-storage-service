@@ -34,9 +34,9 @@ export class LocalUploadTransfer implements UploadTransfer {
     private readonly work: SystemTransactionRunner,
     storage: AppConfig['objectStorage'],
   ) {
-    if (storage?.uploadTransferUrl === undefined) return;
+    if (storage?.uploadTransfer.mode !== 'local-one-shot') return;
     this.bucket = storage.bucket;
-    this.tickets = new UploadTransferTicket(storage.uploadTransferUrl, storage.receiptKeys);
+    this.tickets = new UploadTransferTicket(storage.uploadTransfer.url, storage.receiptKeys);
     this.client = new S3Client({
       endpoint: storage.endpoint,
       region: storage.region,

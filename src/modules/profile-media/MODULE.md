@@ -72,7 +72,8 @@ old asset, so the handler relies on event ID deduplication and the owner waterma
   source cap (at most 5 MiB), and an
   expiry set by the owner, at most five minutes after reservation. An authorized replay preserves
   the original signed response and expiry.
-- Verify the declared type and size using one pinned source generation. Decode a static square
+- Verify the declared type and size using one pinned source generation. With version-aware storage,
+  read the exact staging version observed in its metadata. Decode a static square
   image within byte, pixel, memory and time limits. Avatars accept PNG, JPEG or WebP with a minimum
   side of 256 pixels. Logos accept PNG or static self-contained SVG with external access disabled.
   Source dimensions are bounded at 4,096 pixels per side. Encode a metadata-free PNG at most 512

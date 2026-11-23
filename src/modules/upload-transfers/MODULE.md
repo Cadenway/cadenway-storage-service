@@ -2,9 +2,13 @@
 
 ## Purpose
 
-Receives the local one-shot form capabilities issued by Attachments, Intake and Profile Media
-when `STORAGE_UPLOAD_TRANSFER_URL` is configured. Their modules still own declarations,
-authorization, finalization and cleanup.
+Receives the one-shot form capabilities issued by Attachments, Intake and Profile Media
+in `STORAGE_UPLOAD_TRANSFER_MODE=local-one-shot`. This mode requires the browser loopback URL
+in `STORAGE_UPLOAD_TRANSFER_URL`. The default hosted `presigned-post` mode rejects that URL
+and issues provider-signed forms with a bounded staging lifetime. A provider-signed form can be
+submitted again before it expires. Finalization promotes an observed staging version to a
+separate key and grants read access to the finalized object. The issuing modules still own
+declarations, authorization, finalization and cleanup.
 
 ## Public entry points
 

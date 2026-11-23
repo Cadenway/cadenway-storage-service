@@ -75,7 +75,7 @@ class LocalUploadTransferListener implements OnApplicationBootstrap, BeforeAppli
   // #region Methods
   /** Starts the dedicated listener only for a validated browser-local upload URL. */
   public async onApplicationBootstrap(): Promise<void> {
-    if (this.config.objectStorage?.uploadTransferUrl === undefined) return;
+    if (this.config.objectStorage?.uploadTransfer.mode !== 'local-one-shot') return;
     this.listener = await createLocalUploadTransferApplication(this.config, this.transfer);
     try {
       await this.listener.listen(localUploadTransferPort);

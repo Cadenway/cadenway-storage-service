@@ -183,10 +183,10 @@ The same schedules drain expired encrypted receipts from both paths and reconcil
 needs to allow listing both prefixes when intake uploads are enabled.
 
 On a versioned attachment bucket, enable `S3_ERASE_TRANSIENT_VERSIONS` to inventory and erase
-transient history as well as current objects. The storage principal needs version list and delete
-permissions
-(`s3:ListBucketVersions` and `s3:DeleteObjectVersion`) and must be able to read and write
-the proof prefix below. Hidden versions or delete markers requeue only transient ledger entries and
+transient history as well as current objects. Finalization copies the exact version observed by
+the staging metadata request when the provider returns its version ID. The storage principal needs
+`s3:ListBucketVersions`, `s3:GetObjectVersion` and `s3:DeleteObjectVersion`, and must be able to read
+and write the proof prefix below. Hidden versions or delete markers requeue only transient ledger entries and
 legacy keys identifiable as staging. This includes keys an older cleanup masked with a delete marker.
 The cleanup worker removes explicit
 versions and markers only after it commits a fence. Elected and unclassified pre-migration
