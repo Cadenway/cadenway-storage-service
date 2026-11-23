@@ -58,9 +58,9 @@ export const attachmentObjectStoreProvider: FactoryProvider<ObjectStorage> = {
       },
       objectStorage.publicEndpoint,
       objectStorage.eraseTransientVersions,
-      objectStorage.uploadTransferUrl === undefined
-        ? undefined
-        : new UploadTransferTicket(objectStorage.uploadTransferUrl, objectStorage.receiptKeys),
+      objectStorage.uploadTransfer.mode === 'local-one-shot'
+        ? new UploadTransferTicket(objectStorage.uploadTransfer.url, objectStorage.receiptKeys)
+        : undefined,
     );
   },
 };

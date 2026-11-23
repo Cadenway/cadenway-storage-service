@@ -42,6 +42,7 @@ const objectStorageInput = z.object({
   S3_SECRET_ACCESS_KEY: storageValue,
   S3_FORCE_PATH_STYLE: z.enum(['true', 'false']).optional(),
   S3_ERASE_TRANSIENT_VERSIONS: z.enum(['true', 'false']).optional(),
+  STORAGE_UPLOAD_TRANSFER_MODE: z.enum(['presigned-post', 'local-one-shot']).optional(),
   STORAGE_UPLOAD_TRANSFER_URL: z.preprocess(
     (value) => (value === '' ? undefined : value),
     localUploadTransferUrl.optional(),
@@ -61,6 +62,24 @@ const optionalObjectStorage = objectStorageInput.partial().transform((input, con
     return z.NEVER;
   }
 
+  const mode = result.data.STORAGE_UPLOAD_TRANSFER_MODE ?? 'presigned-post';
+  const transferUrl = result.data.STORAGE_UPLOAD_TRANSFER_URL;
+  if ((mode === 'local-one-shot') !== (transferUrl !== undefined)) {
+    context.addIssue({
+      code: 'custom',
+      path: ['STORAGE_UPLOAD_TRANSFER_URL'],
+      message:
+        mode === 'local-one-shot'
+          ? 'Set the loopback transfer URL in local-one-shot mode.'
+          : 'Set STORAGE_UPLOAD_TRANSFER_MODE to local-one-shot to use a transfer URL.',
+    });
+    return z.NEVER;
+  }
+  const uploadTransfer =
+    transferUrl === undefined
+      ? ({ mode: 'presigned-post' } as const)
+      : ({ mode: 'local-one-shot', url: transferUrl } as const);
+
   const receiptKeys = uploadReceiptKeyringSchema.safeParse(result.data.STORAGE_UPLOAD_RECEIPT_KEYS);
   if (!receiptKeys.success) {
     for (const { message } of receiptKeys.error.issues) {
@@ -79,7 +98,7 @@ const optionalObjectStorage = objectStorageInput.partial().transform((input, con
       secretAccessKey: result.data.S3_SECRET_ACCESS_KEY,
       forcePathStyle: result.data.S3_FORCE_PATH_STYLE === 'true',
       eraseTransientVersions: result.data.S3_ERASE_TRANSIENT_VERSIONS === 'true',
-      uploadTransferUrl: result.data.STORAGE_UPLOAD_TRANSFER_URL,
+      uploadTransfer: Object.freeze(uploadTransfer),
       receiptKeys: receiptKeys.data,
     }),
   };
@@ -125,8 +144,8 @@ const optionalProjectionCursorSecret = z
  *   together with `STORAGE_UPLOAD_RECEIPT_KEYS` when object storage is configured.
  *   `S3_FORCE_PATH_STYLE` and `S3_ERASE_TRANSIENT_VERSIONS` default to false. Enable transient
  *   version erasure for a versioned object bucket with version-list and version-delete access.
- *   `STORAGE_UPLOAD_TRANSFER_URL` optionally enables the dedicated listener for a browser-local
- *   one-shot upload relay.
+ *   `STORAGE_UPLOAD_TRANSFER_MODE` selects provider-signed forms (`presigned-post`, default)
+ *   or the local one-shot relay (`local-one-shot`, requires `STORAGE_UPLOAD_TRANSFER_URL`).
  *   Without any storage settings, the service runs with signed transfers unavailable.
  *
  * `OTEL_EXPORTER_OTLP_ENDPOINT` is read by `telemetry.ts` before the application exists.

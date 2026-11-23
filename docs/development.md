@@ -12,8 +12,7 @@ runs the outbox relay, and its readiness checks PostgreSQL and NATS. The one mig
 tables of the service kit, owned by the platform module (`src/modules/platform/MODULE.md`). No
 business code, route or event exists yet: `@cadenway/contracts` defines no event of this service, so
 nothing is published or consumed. The target architecture in this guide is what they must follow.
-The object storage is not connected: the seven `S3_*` variables are set for the first module that
-stores a file.
+Attachments, Intake and Profile Media use the object storage and upload transfer settings below.
 
 The commands below are the documented workflow. Inspect the repository's actual manifests and files before running them, and report unavailable checks rather than inventing replacements. Run Git, pnpm, build, and test commands with this repository as the working directory, never from the parent workspace.
 
@@ -93,14 +92,18 @@ each value comes from on a server.
 | `OTEL_EXPORTER_OTLP_ENDPOINT`              | `src/telemetry.ts`    | OTLP over HTTP; unset, nothing leaves the process                                                                                                            |
 | `NATS_URL`                                 | The service           | `nats://` URL of the broker                                                                                                                                  |
 | `NATS_USER`, `NATS_PASSWORD`               | The service           | User `storage` and its password; inbox prefix `_INBOX.storage`                                                                                               |
-| `S3_ENDPOINT`, `S3_PUBLIC_ENDPOINT`        | Nothing yet           | Where the service reaches the object storage; the host of the signed URLs                                                                                    |
-| `S3_REGION`, `S3_BUCKET`                   | Nothing yet           | `garage` and `cadenway-local` locally                                                                                                                        |
-| `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | Nothing yet           | The key of the bucket; a secret on a server                                                                                                                  |
-| `S3_FORCE_PATH_STYLE`                      | Nothing yet           | `true` for Garage                                                                                                                                            |
+| `S3_ENDPOINT`, `S3_PUBLIC_ENDPOINT`        | The service           | Internal S3 endpoint and browser-facing endpoint for signed URLs                                                                                             |
+| `S3_REGION`, `S3_BUCKET`                   | The service           | `garage` and `cadenway-local` locally                                                                                                                        |
+| `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | The service           | Credentials of the scoped object storage role                                                                                                                |
+| `S3_FORCE_PATH_STYLE`                      | The service           | `true` for Garage                                                                                                                                            |
+| `STORAGE_UPLOAD_TRANSFER_MODE`             | The service           | `presigned-post` (default) or `local-one-shot`                                                                                                               |
+| `STORAGE_UPLOAD_TRANSFER_URL`              | The service           | Loopback browser endpoint required only in `local-one-shot` mode                                                                                             |
 
-The seven `S3_*` variables are declared now, as cadenway-ops passes them, and join the schema with
-the code that reads them. Locally they point at the Garage of the cadenway-ops stack (`full`
-profile), through Traefik on `http://s3.cadenway.localhost`, with its placeholder key and bucket.
+Locally the S3 settings point at Garage in the Ops `full` profile. To exercise the one-shot
+profile, use the loopback relay URL and a single replica. The hosted `presigned-post` profile
+uses provider-signed forms, which can be submitted again until expiry. The forms target staging
+keys. Both profiles finalize the observed bytes under a separate key. Before changing transfer
+profiles, let outstanding grants expire and issue fresh reservations in the new profile.
 
 ### Calling the service locally
 

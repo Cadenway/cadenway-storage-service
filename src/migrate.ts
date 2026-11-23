@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 
 import { loadConfig } from '@cadenway/nest-common';
 import { provisionJobs } from '@cadenway/nest-jobs/provisioning';
+import { finishOutboxLeaseMigration } from '@cadenway/nest-messaging/outbox/schema';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import pg from 'pg';
@@ -38,7 +39,19 @@ if (!existsSync(`${migrationsFolder}/meta/_journal.json`)) {
     application_name: 'storage-service-migrator',
   });
   try {
-    await migrate(drizzle({ client: pool }), { migrationsFolder });
+    const client = await pool.connect();
+    try {
+      const lock = await client.query<{ acquired: boolean }>(
+        "select pg_try_advisory_lock(hashtextextended('cadenway:service-migrations', 0)) as acquired",
+      );
+      if (lock.rows[0]?.acquired !== true) {
+        throw new Error('Another service migration is running. Retry after it ends.');
+      }
+      await migrate(drizzle({ client }), { migrationsFolder });
+      await finishOutboxLeaseMigration(client);
+    } finally {
+      client.release(true);
+    }
     console.log('Migrations applied.');
   } finally {
     await pool.end();

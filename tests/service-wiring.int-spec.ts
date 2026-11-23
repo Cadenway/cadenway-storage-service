@@ -1,8 +1,11 @@
 import { execFileSync } from 'node:child_process';
 import { createHash, generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto';
 import { EventEmitter, once } from 'node:events';
+import { cp, mkdir, mkdtemp, readFile, rm, rmdir, writeFile } from 'node:fs/promises';
 import { createServer as createHttpServer } from 'node:http';
 import { createServer } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import type { SubscriptionChangedV1 } from '@cadenway/contracts/events/billing-service';
@@ -22,6 +25,8 @@ import { Controller, Get, Injectable, Module } from '@nestjs/common';
 import type { BeforeApplicationShutdown } from '@nestjs/common';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { and, eq, sql } from 'drizzle-orm';
+import { drizzle } from 'drizzle-orm/node-postgres';
+import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import pg from 'pg';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -144,7 +149,7 @@ const serviceTables = [
   ...profileTables,
   'upload_transfer_uses',
 ].sort();
-const appliedMigrations = 9;
+const appliedMigrations = 10;
 
 /**
  * Runs `docker compose` on the throwaway project.
@@ -260,6 +265,33 @@ async function runMigrator(): Promise<void> {
   }
 }
 
+/** Sets up the release preceding the lease expansion. */
+async function runPreLeaseMigrations(client: pg.Pool): Promise<void> {
+  const source = fileURLToPath(new URL('../migrations', import.meta.url));
+  const journal = JSON.parse(await readFile(join(source, 'meta', '_journal.json'), 'utf8')) as {
+    readonly version: string;
+    readonly dialect: string;
+    readonly entries: readonly { readonly tag: string }[];
+  };
+  const entries = journal.entries.slice(0, 9);
+  if (entries.at(-1)?.tag !== '0008_one_shot_upload_transfers') {
+    throw new Error('Pre-lease migration history is missing.');
+  }
+  const folder = await mkdtemp(join(tmpdir(), 'storage-migration-test-'));
+  const meta = join(folder, 'meta');
+  await mkdir(meta);
+  try {
+    for (const { tag } of entries) await cp(join(source, `${tag}.sql`), join(folder, `${tag}.sql`));
+    await writeFile(join(meta, '_journal.json'), JSON.stringify({ ...journal, entries }));
+    await migrate(drizzle({ client }), { migrationsFolder: folder });
+  } finally {
+    await rm(join(meta, '_journal.json'), { force: true });
+    for (const { tag } of entries) await rm(join(folder, `${tag}.sql`), { force: true });
+    await rmdir(meta);
+    await rmdir(folder);
+  }
+}
+
 /** Releases the shutdown held by `ShutdownGate`. */
 let releaseShutdown: () => void = () => undefined;
 
@@ -293,6 +325,7 @@ describe('storage-service wiring', () => {
   let app: NestExpressApplication | undefined;
   let signer: InternalTokenSigner;
   let migrator: pg.Pool;
+  let priorMigrations: readonly { readonly applied: string; readonly hash: string }[];
 
   /**
    * The running application.
@@ -324,7 +357,6 @@ describe('storage-service wiring', () => {
       'MIGRATION_DATABASE_URL',
       `postgres://storage_migrator:storage_migrator@127.0.0.1:${postgresPort}/storage`,
     );
-    await runMigrator();
     migrator = new pg.Pool({
       connectionString: `postgres://storage_migrator:storage_migrator@127.0.0.1:${postgresPort}/storage`,
       max: 1,
@@ -334,6 +366,12 @@ describe('storage-service wiring', () => {
     // The client is terminated (57P01) when a test stops PostgreSQL; the pool reports it as an
     // `error` event, which would otherwise be an uncaught exception.
     migrator.on('error', () => undefined);
+    await runPreLeaseMigrations(migrator);
+    const { rows } = await migrator.query<{ applied: string; hash: string }>(
+      'select created_at as applied, hash from drizzle.__drizzle_migrations order by created_at',
+    );
+    priorMigrations = rows;
+    await runMigrator();
 
     vi.stubEnv('PORT', '3015');
     vi.stubEnv('LOG_PRETTY', 'false');
@@ -390,12 +428,12 @@ describe('storage-service wiring', () => {
     }
   });
 
-  it('applies its migrations as the migrator role, which owns the service tables', async () => {
+  it('upgrades the previous release as the migrator role, which owns the service tables', async () => {
     const tables = await migrator.query<{ tablename: string; tableowner: string }>(
       `select tablename, tableowner from pg_tables where schemaname = 'public' order by tablename`,
     );
-    const journal = await migrator.query<{ applied: number }>(
-      'select count(*)::int as applied from drizzle.__drizzle_migrations',
+    const journal = await migrator.query<{ applied: string; hash: string }>(
+      'select created_at as applied, hash from drizzle.__drizzle_migrations order by created_at',
     );
 
     expect(tables.rows).toEqual(
@@ -404,7 +442,27 @@ describe('storage-service wiring', () => {
         tableowner: 'storage_migrator',
       })),
     );
-    expect(journal.rows).toEqual([{ applied: appliedMigrations }]);
+    expect(priorMigrations).toHaveLength(9);
+    expect(journal.rows).toHaveLength(appliedMigrations);
+    expect(journal.rows.slice(0, 9)).toEqual(priorMigrations);
+  });
+
+  it('finalizes the expiry index and both outbox checks', async () => {
+    const index = await migrator.query<{ indisvalid: boolean }>(
+      `select indisvalid from pg_index
+       where indexrelid = 'public.outbox_events_lease_expiry_index'::regclass`,
+    );
+    expect(index.rows).toEqual([{ indisvalid: true }]);
+    const checks = await migrator.query<{ conname: string; convalidated: boolean }>(
+      `select conname, convalidated from pg_constraint
+       where conrelid = 'public.outbox_events'::regclass
+         and conname in ('outbox_events_status_check', 'outbox_events_lease_check')
+       order by conname`,
+    );
+    expect(checks.rows).toEqual([
+      { conname: 'outbox_events_lease_check', convalidated: true },
+      { conname: 'outbox_events_status_check', convalidated: true },
+    ]);
   });
 
   it('applies nothing when the migrator runs again', async () => {
@@ -501,6 +559,7 @@ describe('storage-service wiring', () => {
       S3_ACCESS_KEY_ID: 'fixture',
       S3_SECRET_ACCESS_KEY: 'fixture',
       S3_FORCE_PATH_STYLE: 'true',
+      STORAGE_UPLOAD_TRANSFER_MODE: 'local-one-shot',
       STORAGE_UPLOAD_TRANSFER_URL: transferUrl,
       STORAGE_UPLOAD_RECEIPT_KEYS: JSON.stringify({
         activeKeyId: 'fixture',
