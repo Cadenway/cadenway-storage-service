@@ -18,6 +18,7 @@ import { addAbortSignal, Readable } from 'node:stream';
 import {
   eraseS3ObjectVersions,
   hasS3ObjectHistory,
+  immutableS3VersionId,
   restoreProofKey,
 } from '../../../../../infrastructure/object-storage/s3-object-versions.js';
 import type { UploadTransferTicket } from '../../../../../infrastructure/object-storage/upload-transfer-ticket.js';
@@ -311,7 +312,7 @@ export class S3ProfileMediaObjects
     signal?.throwIfAborted();
   }
 
-  /** Binds a bounded staged read to the exact ETag inspected before requesting its bytes. */
+  /** Binds a bounded read to the inspected ETag and, when supported, its exact version. */
   public async readSource(
     input: Parameters<ProfileMediaObjects['readSource']>[0],
     signal?: AbortSignal,
@@ -341,7 +342,10 @@ export class S3ProfileMediaObjects
       if (length !== input.sizeBytes || contentType !== input.contentType) {
         throw new ProfileMediaError('invalid-image');
       }
-      return await this.read(key, length, contentType, budget, etag);
+      const versionId = this.eraseTransientVersions
+        ? immutableS3VersionId(observed.VersionId)
+        : undefined;
+      return await this.read(key, length, contentType, budget, { etag, versionId });
     } catch (error) {
       signal?.throwIfAborted();
       if (missing(error) || changed(error)) return null;
@@ -556,7 +560,7 @@ export class S3ProfileMediaObjects
     size: number,
     contentType: string,
     signal: AbortSignal,
-    etag?: string,
+    observed?: { readonly etag: string; readonly versionId: string | undefined },
   ): Promise<Buffer> {
     const result = await privateRequest(() =>
       this.storage.send(
@@ -564,12 +568,13 @@ export class S3ProfileMediaObjects
           Bucket: this.bucket,
           Key: key,
           Range: `bytes=0-${String(size)}`,
-          IfMatch: etag,
+          IfMatch: observed?.etag,
+          VersionId: observed?.versionId,
         }),
         { abortSignal: signal },
       ),
     );
-    return boundedBody(result, size, contentType, signal, etag);
+    return boundedBody(result, size, contentType, signal, observed?.etag);
   }
   // #endregion
 }

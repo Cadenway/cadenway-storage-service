@@ -606,6 +606,24 @@ describe('versioned SeaweedFS object erasure', () => {
       const avatarProof = `attachment-restore-pins/${avatarKey}`;
       const logoProof = `attachment-restore-pins/${logoKey}`;
 
+      const afterStagingHead = (
+        key: string,
+        writeNextVersion: () => Promise<unknown>,
+      ): S3ClientConfig => ({
+        ...configuration,
+        requestHandler: {
+          async handle(
+            request: { readonly method: string; readonly path: string },
+            options?: { readonly abortSignal?: AbortSignal },
+          ) {
+            const result = await s3.config.requestHandler.handle(request, options);
+            if (request.method === 'HEAD' && request.path.endsWith(`/${key}`)) {
+              await writeNextVersion();
+            }
+            return result;
+          },
+        },
+      });
       const copiedKey = `org/${ORGANIZATION}/019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b36`;
       const firstContents = Buffer.from('Version 1');
       const nextContents = Buffer.from('Version 2');
@@ -620,21 +638,7 @@ describe('versioned SeaweedFS object erasure', () => {
         );
       const observed = await writeStagingVersion(firstContents);
       expect(observed.VersionId).toBeTruthy();
-      const delayed: S3ClientConfig = {
-        ...configuration,
-        requestHandler: {
-          async handle(
-            request: { readonly method: string; readonly path: string },
-            options?: { readonly abortSignal?: AbortSignal },
-          ) {
-            const result = await s3.config.requestHandler.handle(request, options);
-            if (request.method === 'HEAD' && request.path.endsWith(`/${STAGING}`)) {
-              await writeStagingVersion(nextContents);
-            }
-            return result;
-          },
-        },
-      };
+      const delayed = afterStagingHead(STAGING, () => writeStagingVersion(nextContents));
       const delayedStore = new S3AttachmentObjectStore(BUCKET, delayed, endpoint, true);
       try {
         expect(
@@ -649,6 +653,44 @@ describe('versioned SeaweedFS object erasure', () => {
       } finally {
         delayedStore.onModuleDestroy();
       }
+
+      const snapshotUpload = '019a7003-4d5e-7f6a-8b9c-0d1e2f3a4b37';
+      const snapshotKey = `profile-media/staging/${snapshotUpload}`;
+      const writeSnapshot = (body: Uint8Array) =>
+        s3.send(
+          new PutObjectCommand({
+            Bucket: BUCKET,
+            Key: snapshotKey,
+            Body: body,
+            ContentLength: body.byteLength,
+            ContentType: 'image/png',
+          }),
+        );
+      expect((await writeSnapshot(PNG)).VersionId).toBeTruthy();
+      const delayedProfiles = new S3ProfileMediaObjects(
+        BUCKET,
+        afterStagingHead(snapshotKey, () => writeSnapshot(PNG.slice(0, -1))),
+        endpoint,
+        true,
+      );
+      try {
+        const source = await delayedProfiles.readSource({
+          owner: avatar,
+          uploadId: snapshotUpload,
+          sizeBytes: PNG.length,
+          contentType: 'image/png',
+        });
+        expect(source).toEqual(image);
+      } finally {
+        delayedProfiles.onModuleDestroy();
+      }
+      await profiles.erase({
+        ...work,
+        owner: avatar,
+        uploadId: snapshotUpload,
+        objectId: snapshotUpload,
+        retention: 'transient',
+      });
 
       const avatarTransfer = await profiles.sign({
         ...avatarImage,

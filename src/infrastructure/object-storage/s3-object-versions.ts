@@ -3,6 +3,11 @@ import { DeleteObjectsCommand, ListObjectVersionsCommand, type S3Client } from '
 const versionPageSize = 100;
 const erasureBatchLimit = 10;
 
+/** Returns an immutable version ID and excludes S3's mutable null version slot. */
+export function immutableS3VersionId(value: string | undefined): string | undefined {
+  return value === '' || value === 'null' ? undefined : value;
+}
+
 /** Uses the private restore-evidence namespace shared by attachment and profile media. */
 export function restoreProofKey(key: string): string {
   return 'attachment-restore-pins/' + key;

@@ -22,6 +22,7 @@ import { addAbortSignal, Readable } from 'node:stream';
 import {
   eraseS3ObjectVersions,
   hasS3ObjectHistory,
+  immutableS3VersionId,
   restoreProofKey,
 } from '../../../../../infrastructure/object-storage/s3-object-versions.js';
 import type { UploadTransferTicket } from '../../../../../infrastructure/object-storage/upload-transfer-ticket.js';
@@ -494,14 +495,13 @@ export class S3AttachmentObjectStore
           verifiedContentType: null,
         };
       }
-      const observedVersion = staged.VersionId;
+      const observedVersion = this.eraseTransientVersions
+        ? immutableS3VersionId(staged.VersionId)
+        : undefined;
       const source = `${this.bucket}/${stagingKey}`;
       // Version-aware storage can copy the inspected version even if a new staging write arrives.
       const copySource =
-        this.eraseTransientVersions &&
-        observedVersion !== undefined &&
-        observedVersion !== '' &&
-        observedVersion !== 'null'
+        observedVersion !== undefined
           ? `${source}?versionId=${encodeURIComponent(observedVersion)}`
           : source;
       const copy = await this.storage.send(
